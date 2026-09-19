@@ -14,10 +14,17 @@ jobs:
       - name: Descargar código
         uses: actions/checkout@v4
 
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Verificar Flutter
         run: flutter --version
@@ -30,3 +37,12 @@ jobs:
 
       - name: Ejecutar pruebas
         run: flutter test
+
+      - name: Construir APK
+        run: flutter build apk --release
+
+      - name: Subir APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: domotica-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
