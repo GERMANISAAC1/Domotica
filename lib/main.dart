@@ -11,20 +11,18 @@
 //            Snapshot JPG    : /shot.jpg     (GET — para miniatura)
 //  [CAM-2] Al tocar la tarjeta de un dispositivo tipo cámara se abre
 //          CamaraPage en pantalla completa con stream MJPEG en vivo.
-//  [CAM-3] CamaraPage: controles ON/OFF, snap para foto, indicador
-//          de estado de conexión y botón de pantalla completa.
+//  [CAM-3] CamaraPage: controles ON/OFF, indicador de estado y
+//          diagnóstico.
 //  [CAM-4] MjpegWidget: decodifica el stream multipart/x-mixed-replace
-//          cuadro a cuadro sin paquete externo — solo dart:typed_data
-//          y flutter/painting. Robusto a cortes de red.
+//          cuadro a cuadro sin paquete externo.
 //  [CAM-5] _ControlCard detecta tipo cámara y abre CamaraPage en
 //          lugar del toggle habitual.
 //
-// CORRECCIONES anteriores mantenidas (v5.1 / v5.2):
-//  [FIX-1..8] — ver cabecera original de v5.2
+// CORRECCIONES anteriores mantenidas (v5.1 / v5.2).
+// Limpieza de lint: imports, final, if con llaves, underscores, Switch.
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -487,7 +485,7 @@ class DispositivoRepo {
 // ════════════════════════════════════════════════════════════════
 class DispositivosNotifier extends ChangeNotifier {
   final SharedPreferences _prefs;
-  List<Dispositivo> _items;
+  final List<Dispositivo> _items;
   int  _nextId = 1;
   bool _demo   = false;
   final List<LogEntry> _log = [];
@@ -650,9 +648,6 @@ class DispositivosNotifier extends ChangeNotifier {
   }
 
   void _save() => DispositivoRepo.guardar(_prefs, _items);
-
-  @override
-  void dispose() => super.dispose();
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -719,7 +714,7 @@ class DomoticaApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: notifier,
-        builder: (_, __) => MaterialApp(
+        builder: (_, _) => MaterialApp(
           debugShowCheckedModeBanner: false,
           title: 'Domótica Pro',
           theme: ThemeData(
@@ -868,7 +863,7 @@ class _BottomNav extends StatelessWidget {
 // [CAM-4] MJPEG WIDGET — stream MJPEG cuadro a cuadro sin plugin
 // ════════════════════════════════════════════════════════════════
 /// Decodifica un stream multipart/x-mixed-replace (MJPEG) cuadro
-/// a cuadro usando solo http.Client y dart:typed_data.
+/// a cuadro usando solo http.Client.
 /// Muestra cada frame como Image.memory en cuanto llega.
 class MjpegWidget extends StatefulWidget {
   final String  streamUrl;
@@ -1124,9 +1119,13 @@ class _CamaraPageState extends State<CamaraPage> {
     _scheduleHide();
   }
 
+  // Idempotente: solo cambia el estado si es distinto al deseado
   Future<void> _setCamara(bool encender) async {
-    widget.notifier.toggle(_d.id);
-    // Refrescar estado local
+    final actual = widget.notifier.items
+        .firstWhere((x) => x.id == _d.id, orElse: () => _d);
+    if (actual.encendido != encender) {
+      widget.notifier.toggle(_d.id);
+    }
     final updated = widget.notifier.items
         .firstWhere((x) => x.id == _d.id, orElse: () => _d);
     if (mounted) setState(() => _d = updated);
@@ -1438,7 +1437,7 @@ class _ControlPageState extends State<ControlPage> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.notifier,
-      builder: (_, __) {
+      builder: (_, _) {
         final n   = widget.notifier;
         final enc = n.encendidos;
         final tot = n.items.length;
@@ -1569,7 +1568,7 @@ class _ControlHeader extends StatelessWidget {
                   child: TweenAnimationBuilder<double>(
                     tween:    Tween(begin: 0, end: pct),
                     duration: const Duration(milliseconds: 600),
-                    builder: (_, v, __) => LinearProgressIndicator(
+                    builder: (_, v, _) => LinearProgressIndicator(
                       value:      v,
                       minHeight:  6,
                       backgroundColor: C.border,
@@ -1903,7 +1902,7 @@ class _HabPageState extends State<HabitacionesPage> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.notifier,
-      builder: (_, __) {
+      builder: (_, _) {
         final n    = widget.notifier;
         final habs = n.habitaciones;
         if (!habs.contains(_sel)) _sel = 'Todas';
@@ -1982,7 +1981,7 @@ class _HabTabs extends StatelessWidget {
           padding: const EdgeInsets.symmetric(
               horizontal: 14, vertical: 6),
           itemCount: habs.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
           itemBuilder: (_, i) {
             final h      = habs[i];
             final active = h == sel;
@@ -2120,7 +2119,7 @@ class _DispPageState extends State<DispositivosPage> {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: widget.notifier,
-      builder: (_, __) {
+      builder: (_, _) {
         final n = widget.notifier;
         final q = _query.toLowerCase();
         final filtered = n.items
@@ -2350,7 +2349,7 @@ class _DispCardState extends State<_DispCard> {
                     : Switch(
                         value:    d.encendido,
                         onChanged: (_) => _toggle(),
-                        activeColor:      Colors.white,
+                        activeThumbColor: Colors.white,
                         activeTrackColor: col,
                         inactiveThumbColor: C.t3,
                         inactiveTrackColor: C.surface,
@@ -2763,10 +2762,12 @@ class _DeviceFormState extends State<_DeviceForm> {
                       hintText: 'https://abc123.ngrok.io'),
                   onChanged: (_) => setState(() => _pingOk = null),
                   validator: (v) {
-                    if (v == null || v.trim().isEmpty)
+                    if (v == null || v.trim().isEmpty) {
                       return 'URL requerida';
-                    if (!v.trim().startsWith('http'))
+                    }
+                    if (!v.trim().startsWith('http')) {
                       return 'Debe empezar con http o https';
+                    }
                     return null;
                   },
                 ),
@@ -2805,13 +2806,16 @@ class _DeviceFormState extends State<_DeviceForm> {
                       InputDecoration(hintText: _modo.hint),
                   onChanged: (_) => setState(() => _pingOk = null),
                   validator: (v) {
-                    if (v == null || v.trim().isEmpty)
+                    if (v == null || v.trim().isEmpty) {
                       return 'IP requerida';
-                    if (v.trim() == '0.0.0.0')
+                    }
+                    if (v.trim() == '0.0.0.0') {
                       return 'IP inválida';
+                    }
                     if (v.trim() == 'localhost' ||
-                        v.trim() == '127.0.0.1')
+                        v.trim() == '127.0.0.1') {
                       return 'No uses localhost';
+                    }
                     return null;
                   },
                 ),
@@ -2828,11 +2832,13 @@ class _DeviceFormState extends State<_DeviceForm> {
                               ? '8888'
                               : '80'),
                   validator: (v) {
-                    if (v == null || v.trim().isEmpty)
+                    if (v == null || v.trim().isEmpty) {
                       return 'Requerido';
+                    }
                     final n = int.tryParse(v.trim());
-                    if (n == null || n < 1 || n > 65535)
+                    if (n == null || n < 1 || n > 65535) {
                       return 'Puerto inválido (1-65535)';
+                    }
                     return null;
                   },
                 ),
@@ -2979,10 +2985,12 @@ class _DeviceFormState extends State<_DeviceForm> {
       puerto:  int.tryParse(_cPuerto.text.trim()) ?? 8888,
       urlBase: _cUrl.text.trim(),
     );
-    if (mounted) setState(() {
-      _pinging = false;
-      _pingOk  = ok;
-    });
+    if (mounted) {
+      setState(() {
+        _pinging = false;
+        _pingOk  = ok;
+      });
+    }
   }
 
   Future<void> _doSave() async {
@@ -3021,7 +3029,7 @@ class _DeviceFormState extends State<_DeviceForm> {
         setState(() => _saving = false);
         if (ok) {
           Navigator.pop(context);
-          snack(context, 'Cámara agregada ✓');
+          snack(context, 'Dispositivo agregado ✓');
         } else {
           snack(context, 'Error al guardar', error: true);
         }
@@ -3041,7 +3049,7 @@ class HistorialPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: notifier,
-      builder: (_, __) {
+      builder: (_, _) {
         final log = notifier.log;
         return Scaffold(
           backgroundColor: C.bg,
@@ -3314,11 +3322,13 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
     }
 
     _log('✓ Diagnóstico completo — relay NO fue activado', true);
-    setState(() => _running = false);
+    if (mounted) setState(() => _running = false);
   }
 
-  void _log(String msg, bool? ok) =>
-      setState(() => _logs.add(_DiagLog(msg, ok)));
+  void _log(String msg, bool? ok) {
+    if (!mounted) return;
+    setState(() => _logs.add(_DiagLog(msg, ok)));
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -3350,8 +3360,12 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
               itemBuilder: (_, i) {
                 final l = _logs[i];
                 Color col = C.t2;
-                if (l.ok == true)  col = C.green;
-                if (l.ok == false) col = C.red;
+                if (l.ok == true) {
+                  col = C.green;
+                }
+                if (l.ok == false) {
+                  col = C.red;
+                }
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: Text(l.msg,
