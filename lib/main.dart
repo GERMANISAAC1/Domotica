@@ -1,25 +1,17 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  DOMÓTICA PRO  v5.3  —  Producción                              ║
+// ║  DOMÓTICA PRO  v5.4  —  Producción                              ║
 // ╚══════════════════════════════════════════════════════════════════╝
 //
-// NOVEDADES v5.3:
-//  [CAM-1] Nuevo tipo TipoD.camara — Web Remote Droid stream MJPEG.
-//          Paths confirmados:
-//            Encender cámara : /camera/on   (GET)
-//            Apagar cámara   : /camera/off  (GET)
-//            Stream MJPEG    : /video        (GET)
-//            Snapshot JPG    : /shot.jpg     (GET — para miniatura)
-//  [CAM-2] Al tocar la tarjeta de un dispositivo tipo cámara se abre
-//          CamaraPage en pantalla completa con stream MJPEG en vivo.
-//  [CAM-3] CamaraPage: controles ON/OFF, indicador de estado y
-//          diagnóstico.
-//  [CAM-4] MjpegWidget: decodifica el stream multipart/x-mixed-replace
-//          cuadro a cuadro sin paquete externo.
-//  [CAM-5] _ControlCard detecta tipo cámara y abre CamaraPage en
-//          lugar del toggle habitual.
+// NOVEDADES v5.4:
+//  [CAM-A] Web Remote Droid NO entrega stream MJPEG: solo fotos en
+//          /camera/{index}/picture. La cámara ahora se ve pidiendo una
+//          foto cada ~700 ms (SnapshotWidget).
+//  [CAM-B] Encender/apagar una cámara ya no envía comandos de red:
+//          solo activa/desactiva la vista.
+//  [CAM-C] Diagnóstico de cámara verifica la foto (/camera/0/picture).
+//  Luz del celular: /flash/on y /flash/off (sin cambios).
 //
-// CORRECCIONES anteriores mantenidas (v5.1 / v5.2).
-// Limpieza de lint: imports, final, if con llaves, underscores, Switch.
+// Requisitos Android: permiso INTERNET y usesCleartextTraffic="true".
 
 import 'dart:async';
 import 'dart:convert';
@@ -49,7 +41,7 @@ class C {
   static const purpleGlow = Color(0x269B6DFF);
   static const yellow     = Color(0xFFFFCC44);
   static const yellowGlow = Color(0x26FFCC44);
-  static const cyan       = Color(0xFF00D4FF);   // [CAM-1] color cámara
+  static const cyan       = Color(0xFF00D4FF);
   static const cyanGlow   = Color(0x2600D4FF);
   static const t1         = Color(0xFFF0F4FF);
   static const t2         = Color(0xFF7B8DB8);
@@ -74,6 +66,7 @@ class AppConfig {
   static const retryDelay   = Duration(milliseconds: 600);
   static const maxLogItems  = 300;
   static const storageKey   = 'domotica_v5';
+  static const snapInterval = Duration(milliseconds: 700);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -89,12 +82,12 @@ extension ModoConexionX on ModoConexion {
       };
   String get hint => switch (this) {
         ModoConexion.lan   => '192.168.1.100',
-        ModoConexion.movil => '10.151.28.43',
+        ModoConexion.movil => '100.64.75.125',
         ModoConexion.url   => 'https://mi-tunel.ngrok.io',
       };
   String get descripcion => switch (this) {
         ModoConexion.lan   => 'Misma red WiFi. IP privada (192.168.x.x).',
-        ModoConexion.movil => 'Cualquier red. IP pública + puerto abierto.',
+        ModoConexion.movil => 'Cualquier red. IP pública, Tailscale (100.x.x.x) o puerto abierto.',
         ModoConexion.url   => 'URL completa. Túneles ngrok, Cloudflare, DDNS.',
       };
   IconData get icon => switch (this) {
@@ -114,7 +107,6 @@ extension ModoConexionX on ModoConexion {
 // ════════════════════════════════════════════════════════════════
 // ENUMS DISPOSITIVO
 // ════════════════════════════════════════════════════════════════
-// [CAM-1] Agregado TipoD.camara
 enum TipoD { tasmota, sonoff, shelly, celular, camara, otro }
 
 extension TipoDX on TipoD {
@@ -131,7 +123,7 @@ extension TipoDX on TipoD {
         TipoD.sonoff  => Icons.bolt_rounded,
         TipoD.shelly  => Icons.router_rounded,
         TipoD.celular => Icons.smartphone_rounded,
-        TipoD.camara  => Icons.videocam_rounded,   // [CAM-1]
+        TipoD.camara  => Icons.videocam_rounded,
         TipoD.otro    => Icons.settings_input_hdmi_rounded,
       };
   Color get color => switch (this) {
@@ -139,17 +131,17 @@ extension TipoDX on TipoD {
         TipoD.sonoff  => C.orange,
         TipoD.shelly  => C.green,
         TipoD.celular => C.yellow,
-        TipoD.camara  => C.cyan,    // [CAM-1]
+        TipoD.camara  => C.cyan,
         TipoD.otro    => C.t2,
       };
 
-  // [CAM-1] Paths Web Remote Droid para cámara
+  // Las cámaras no usan comandos on/off de red: solo activan la vista.
   String get pathOn => switch (this) {
         TipoD.tasmota => '/cm?cmnd=Power+On',
         TipoD.sonoff  => '/control?cmd=on',
         TipoD.shelly  => '/relay/0?turn=on',
         TipoD.celular => '/flash/on',
-        TipoD.camara  => '/camera/on',
+        TipoD.camara  => '/',
         TipoD.otro    => '/on',
       };
   String get pathOff => switch (this) {
@@ -157,19 +149,16 @@ extension TipoDX on TipoD {
         TipoD.sonoff  => '/control?cmd=off',
         TipoD.shelly  => '/relay/0?turn=off',
         TipoD.celular => '/flash/off',
-        TipoD.camara  => '/camera/off',
+        TipoD.camara  => '/',
         TipoD.otro    => '/off',
       };
 
-  // [CAM-1] Path del stream MJPEG (solo para tipo camara)
-  String get pathStream => '/video';
-
-  // [CAM-1] Path del snapshot JPG (solo para tipo camara)
-  String get pathSnapshot => '/shot.jpg';
+  // Web Remote Droid: foto en /camera/{index}/picture (0 = primera cámara)
+  String get pathSnapshot => '/camera/0/picture';
 
   List<String> get pathsOnFallback => switch (this) {
         TipoD.celular => ['/flash/on', '/?action=on', '/flash?on=1'],
-        TipoD.camara  => ['/camera/on', '/video/on', '/?camera=on'],  // [CAM-1]
+        TipoD.camara  => ['/'],
         TipoD.tasmota => ['/cm?cmnd=Power+On', '/cm?cmnd=Power1+On'],
         TipoD.shelly  => ['/relay/0?turn=on', '/rpc/Switch.Set?id=0&on=true'],
         _ => [pathOn],
@@ -177,13 +166,12 @@ extension TipoDX on TipoD {
 
   List<String> get pathsOffFallback => switch (this) {
         TipoD.celular => ['/flash/off', '/?action=off', '/flash?on=0'],
-        TipoD.camara  => ['/camera/off', '/video/off', '/?camera=off'],  // [CAM-1]
+        TipoD.camara  => ['/'],
         TipoD.tasmota => ['/cm?cmnd=Power+Off', '/cm?cmnd=Power1+Off'],
         TipoD.shelly  => ['/relay/0?turn=off', '/rpc/Switch.Set?id=0&on=false'],
         _ => [pathOff],
       };
 
-  // [CAM-1] ¿Es un dispositivo de video?
   bool get esCamara => this == TipoD.camara;
 
   static TipoD fromStr(String s) => TipoD.values
@@ -294,8 +282,7 @@ class Dispositivo {
   String get urlOn  => '$_base${tipo.pathOn}';
   String get urlOff => '$_base${tipo.pathOff}';
 
-  // [CAM-1] URLs específicas de cámara
-  String get urlStream   => '$_base${tipo.pathStream}';
+  // URL de la foto de la cámara
   String get urlSnapshot => '$_base${tipo.pathSnapshot}';
 
   List<String> get urlsOnFallback  =>
@@ -532,7 +519,8 @@ class DispositivosNotifier extends ChangeNotifier {
     if (hasListeners) notifyListeners();
     _save();
 
-    if (!_demo) {
+    // Las cámaras solo activan/desactivan la vista: no hay comando de red.
+    if (!_demo && !d.tipo.esCamara) {
       _fireAndForget(d, nuevoEstado);
     }
   }
@@ -860,168 +848,90 @@ class _BottomNav extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════════════
-// [CAM-4] MJPEG WIDGET — stream MJPEG cuadro a cuadro sin plugin
+// [CAM-A] SNAPSHOT WIDGET — "video" pidiendo fotos periódicas
 // ════════════════════════════════════════════════════════════════
-/// Decodifica un stream multipart/x-mixed-replace (MJPEG) cuadro
-/// a cuadro usando solo http.Client.
-/// Muestra cada frame como Image.memory en cuanto llega.
-class MjpegWidget extends StatefulWidget {
-  final String  streamUrl;
-  final BoxFit  fit;
-  const MjpegWidget({
+/// Pide una foto a [url] cada [interval] y la muestra. Sirve para
+/// Web Remote Droid (/camera/0/picture), que no ofrece stream MJPEG.
+class SnapshotWidget extends StatefulWidget {
+  final String   url;
+  final Duration interval;
+  final BoxFit   fit;
+  const SnapshotWidget({
     super.key,
-    required this.streamUrl,
+    required this.url,
+    this.interval = AppConfig.snapInterval,
     this.fit = BoxFit.contain,
   });
 
   @override
-  State<MjpegWidget> createState() => _MjpegWidgetState();
+  State<SnapshotWidget> createState() => _SnapshotWidgetState();
 }
 
-class _MjpegWidgetState extends State<MjpegWidget> {
-  http.Client?        _client;
-  StreamSubscription? _sub;
-  Uint8List?          _frame;
-  String?             _error;
-  bool                _connecting = true;
-
-  // Marcadores JPEG
-  static final _soiMarker = Uint8List.fromList([0xFF, 0xD8]); // Start Of Image
-  static final _eoiMarker = Uint8List.fromList([0xFF, 0xD9]); // End Of Image
+class _SnapshotWidgetState extends State<SnapshotWidget> {
+  Timer?     _timer;
+  Uint8List? _frame;
+  String?    _error;
+  bool       _loading = false;
+  int        _fails   = 0;
 
   @override
   void initState() {
     super.initState();
-    _connect();
+    _fetch();
+    _timer = Timer.periodic(widget.interval, (_) => _fetch());
   }
 
   @override
-  void didUpdateWidget(MjpegWidget old) {
+  void didUpdateWidget(SnapshotWidget old) {
     super.didUpdateWidget(old);
-    if (old.streamUrl != widget.streamUrl) {
-      _disconnect();
-      _connect();
+    if (old.url != widget.url) {
+      _frame = null;
+      _error = null;
+      _fails = 0;
+      _fetch();
     }
   }
 
-  Future<void> _connect() async {
-    if (!mounted) return;
-    setState(() {
-      _connecting = true;
-      _error      = null;
-      _frame      = null;
-    });
-
+  Future<void> _fetch() async {
+    if (_loading) return;
+    _loading = true;
     try {
-      _client = http.Client();
-      final request  = http.Request('GET', Uri.parse(widget.streamUrl));
-      final response = await _client!.send(request).timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => throw TimeoutException('Timeout al conectar con la cámara'),
-      );
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}');
+      final r = await http
+          .get(Uri.parse('${widget.url}?quality=60&scale=0.7'))
+          .timeout(const Duration(seconds: 6));
+      if (r.statusCode < 200 || r.statusCode >= 300) {
+        throw Exception('HTTP ${r.statusCode}');
       }
-
-      if (mounted) setState(() => _connecting = false);
-
-      // Buffer acumulador de bytes
-      final buf = <int>[];
-
-      _sub = response.stream.listen(
-        (chunk) {
-          buf.addAll(chunk);
-          _extractFrames(buf);
-        },
-        onError: (e) {
-          if (mounted) setState(() => _error = 'Error de stream: $e');
-        },
-        onDone: () {
-          if (mounted) setState(() => _error = 'Stream terminado');
-        },
-      );
-    } catch (e) {
+      if (r.bodyBytes.isEmpty) {
+        throw Exception('Respuesta vacía');
+      }
+      _fails = 0;
       if (mounted) {
         setState(() {
-          _connecting = false;
-          _error      = e.toString();
+          _frame = r.bodyBytes;
+          _error = null;
         });
       }
-    }
-  }
-
-  /// Extrae todos los frames JPEG completos del buffer acumulado.
-  /// Un frame JPEG comienza con FFD8 y termina con FFD9.
-  void _extractFrames(List<int> buf) {
-    while (true) {
-      // Buscar inicio de JPEG
-      final start = _indexOf(buf, _soiMarker, 0);
-      if (start == -1) {
-        // Sin SOI: limpiar basura
-        buf.clear();
-        break;
+    } catch (e) {
+      _fails++;
+      // Mostrar el error solo si fallan varios intentos seguidos
+      if (mounted && (_frame == null || _fails >= 3)) {
+        setState(() => _error = e.toString());
       }
-
-      // Buscar fin de JPEG desde el inicio encontrado
-      final end = _indexOf(buf, _eoiMarker, start + 2);
-      if (end == -1) break; // Frame incompleto — esperar más datos
-
-      // Frame completo: extraer
-      final frameEnd = end + 2;
-      final frame    = Uint8List.fromList(buf.sublist(start, frameEnd));
-
-      // Quitar el frame procesado del buffer
-      buf.removeRange(0, frameEnd);
-
-      if (mounted) {
-        setState(() => _frame = frame);
-      }
+    } finally {
+      _loading = false;
     }
-  }
-
-  /// Busca la primera ocurrencia de [pattern] en [data] desde [from].
-  int _indexOf(List<int> data, Uint8List pattern, int from) {
-    outer:
-    for (int i = from; i <= data.length - pattern.length; i++) {
-      for (int j = 0; j < pattern.length; j++) {
-        if (data[i + j] != pattern[j]) continue outer;
-      }
-      return i;
-    }
-    return -1;
-  }
-
-  void _disconnect() {
-    _sub?.cancel();
-    _client?.close();
-    _sub    = null;
-    _client = null;
   }
 
   @override
   void dispose() {
-    _disconnect();
+    _timer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_connecting) {
-      return const Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(color: C.cyan, strokeWidth: 2),
-            SizedBox(height: 16),
-            Text('Conectando a la cámara...',
-                style: TextStyle(color: C.t2, fontSize: 13)),
-          ],
-        ),
-      );
-    }
-
-    if (_error != null) {
+    if (_error != null && _frame == null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -1040,18 +950,11 @@ class _MjpegWidgetState extends State<MjpegWidget> {
               Text(_error!,
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: C.t3, fontSize: 12)),
-              const SizedBox(height: 20),
-              OutlinedButton.icon(
-                onPressed: () {
-                  _disconnect();
-                  _connect();
-                },
-                icon:  const Icon(Icons.refresh_rounded, color: C.cyan),
-                label: const Text('Reintentar',
-                    style: TextStyle(color: C.cyan)),
-                style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: C.cyan)),
-              ),
+              const SizedBox(height: 8),
+              const Text(
+                  'Revisa que Web Remote Droid esté abierto y con permiso de cámara.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: C.t3, fontSize: 11)),
             ],
           ),
         ),
@@ -1060,21 +963,51 @@ class _MjpegWidgetState extends State<MjpegWidget> {
 
     if (_frame == null) {
       return const Center(
-        child: Text('Esperando primer cuadro...',
-            style: TextStyle(color: C.t3, fontSize: 12)),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: C.cyan, strokeWidth: 2),
+            SizedBox(height: 16),
+            Text('Conectando a la cámara...',
+                style: TextStyle(color: C.t2, fontSize: 13)),
+          ],
+        ),
       );
     }
 
-    return Image.memory(
-      _frame!,
-      fit:             widget.fit,
-      gaplessPlayback: true, // evita parpadeo entre frames
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Image.memory(
+          _frame!,
+          fit:             widget.fit,
+          gaplessPlayback: true,
+        ),
+        if (_error != null)
+          Positioned(
+            top: 90,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: C.red.withValues(alpha: 0.85),
+                  borderRadius: R.xl,
+                ),
+                child: const Text('Conexión inestable',
+                    style: TextStyle(color: Colors.white, fontSize: 11)),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
 
 // ════════════════════════════════════════════════════════════════
-// [CAM-2] CAMARA PAGE — pantalla completa con stream y controles
+// CAMARA PAGE — pantalla completa con vista y controles
 // ════════════════════════════════════════════════════════════════
 class CamaraPage extends StatefulWidget {
   final Dispositivo          d;
@@ -1095,7 +1028,7 @@ class _CamaraPageState extends State<CamaraPage> {
     super.initState();
     _d = widget.d;
     _scheduleHide();
-    // Si la cámara no está encendida, encenderla automáticamente
+    // Si la cámara no está activa, activar la vista automáticamente
     if (!_d.encendido) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _setCamara(true));
     }
@@ -1140,15 +1073,14 @@ class _CamaraPageState extends State<CamaraPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(children: [
-        // ── 1. Stream de video ─────────────────────────────────
+        // ── 1. Vista de la cámara ──────────────────────────────
         GestureDetector(
           onTap: _showControls,
           child: SizedBox.expand(
             child: dActual.encendido
-                ? MjpegWidget(
-                    key:       ValueKey(dActual.urlStream),
-                    streamUrl: dActual.urlStream,
-                    fit:       BoxFit.contain,
+                ? SnapshotWidget(
+                    key: ValueKey(dActual.urlSnapshot),
+                    url: dActual.urlSnapshot,
                   )
                 : const _CamaraApagada(),
           ),
@@ -1224,7 +1156,7 @@ class _CamaraPageState extends State<CamaraPage> {
                       ],
                     ),
                   ),
-                  // Badge de URL
+                  // Badge de conexión
                   Flexible(
                     child: Container(
                       padding: const EdgeInsets.symmetric(
@@ -1287,19 +1219,17 @@ class _CamaraPageState extends State<CamaraPage> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      // Botón encender/apagar
                       _CamControlBtn(
                         icon: dActual.encendido
                             ? Icons.videocam_off_rounded
                             : Icons.videocam_rounded,
                         label: dActual.encendido
-                            ? 'Apagar cámara'
-                            : 'Encender cámara',
+                            ? 'Detener vista'
+                            : 'Ver cámara',
                         color: dActual.encendido ? C.red : C.cyan,
                         onTap: () => _setCamara(!dActual.encendido),
                       ),
                       const SizedBox(width: 24),
-                      // Botón de diagnóstico
                       _CamControlBtn(
                         icon:  Icons.wifi_find_rounded,
                         label: 'Diagnóstico',
@@ -1343,7 +1273,7 @@ class _CamaraApagada extends StatelessWidget {
                     fontSize: 16,
                     fontWeight: FontWeight.w600)),
             SizedBox(height: 8),
-            Text('Toca "Encender cámara" para iniciar el stream',
+            Text('Toca "Ver cámara" para iniciar la vista',
                 style: TextStyle(color: Color(0xFF2A3050), fontSize: 12)),
           ],
         ),
@@ -1419,7 +1349,7 @@ class ControlPage extends StatefulWidget {
 }
 
 class _ControlPageState extends State<ControlPage> {
-  // [CAM-5] Redirige a CamaraPage si es tipo camara
+  // Redirige a CamaraPage si es tipo camara
   void _onCardTap(Dispositivo d) {
     if (d.tipo.esCamara) {
       Navigator.push(
@@ -1614,7 +1544,6 @@ class _PercentRing extends StatelessWidget {
       );
 }
 
-// [CAM-5] _ControlCard ahora acepta onTap (para cámara) y onToggle
 class _ControlCard extends StatelessWidget {
   final Dispositivo  d;
   final bool         busy;
@@ -1638,7 +1567,6 @@ class _ControlCard extends StatelessWidget {
         ? d.tipo.color.withValues(alpha: 0.45)
         : C.border;
 
-    // [CAM-5] Las tarjetas de cámara muestran ícono de play en lugar del botón power
     final esCamara = d.tipo.esCamara;
 
     return AnimatedContainer(
@@ -1699,10 +1627,6 @@ class _ControlCard extends StatelessWidget {
                     _MicroBadge(d.tipo.label, col: d.tipo.color),
                     const SizedBox(width: 6),
                     _MicroBadge(d.habitacion, col: C.t3),
-                    if (esCamara) ...[
-                      const SizedBox(width: 6),
-                      _MicroBadge('MJPEG', col: C.cyan),
-                    ],
                   ]),
                   const SizedBox(height: 4),
                   Row(children: [
@@ -1719,7 +1643,6 @@ class _ControlCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
-            // [CAM-5] Botón diferente para cámara
             esCamara
                 ? _CameraOpenButton(
                     encendido: d.encendido,
@@ -1739,7 +1662,7 @@ class _ControlCard extends StatelessWidget {
   }
 }
 
-// [CAM-5] Botón de abrir cámara (en lugar del botón power)
+// Botón de abrir cámara (en lugar del botón power)
 class _CameraOpenButton extends StatelessWidget {
   final bool         encendido;
   final Color        color;
@@ -2307,8 +2230,6 @@ class _DispCardState extends State<_DispCard> {
                     _MicroBadge(d.tipo.label, col: col),
                     _MicroBadge(d.habitacion,  col: C.t2),
                     _MicroBadge(d.modo.label,  col: d.modo.color),
-                    if (d.tipo.esCamara)
-                      _MicroBadge('MJPEG', col: C.cyan),
                   ]),
                 ],
               ),
@@ -2319,7 +2240,6 @@ class _DispCardState extends State<_DispCard> {
                     child: CircularProgressIndicator(
                         strokeWidth: 2, color: col))
                 : d.tipo.esCamara
-                    // [CAM-5] Switch diferente para cámara
                     ? GestureDetector(
                         onTap: _openCamara,
                         child: Container(
@@ -2482,7 +2402,7 @@ class _DeviceFormState extends State<_DeviceForm> {
     _cUrl    = TextEditingController(text: e?.urlBase ?? '');
     _cHab    =
         TextEditingController(text: e?.habitacion ?? 'General');
-    _tipo    = e?.tipo ?? TipoD.camara;    // [CAM-1] default cámara
+    _tipo    = e?.tipo ?? TipoD.camara;
     _cat     = e?.cat  ?? CatArtefacto.camara;
     _modo    = e?.modo ?? ModoConexion.movil;
   }
@@ -2516,20 +2436,23 @@ class _DeviceFormState extends State<_DeviceForm> {
     }
   }
 
-  // [CAM-1] Preview de la URL del stream
-  String get _streamPreview {
+  // Preview de la URL de la foto de la cámara
+  String get _snapshotPreview {
     try {
-      if (_tipo != TipoD.camara) return '';
       if (_modo == ModoConexion.url) {
         final base =
             _cUrl.text.trim().replaceAll(RegExp(r'/$'), '');
-        return base.isEmpty ? '' : '$base${_tipo.pathStream}';
+        return base.isEmpty
+            ? '(ingresa la URL)'
+            : '$base${_tipo.pathSnapshot}';
       }
       final ip = _cIp.text.trim();
       final p  = _cPuerto.text.trim();
-      return ip.isEmpty ? '' : 'http://$ip:$p${_tipo.pathStream}';
+      return ip.isEmpty
+          ? '(ingresa la IP)'
+          : 'http://$ip:$p${_tipo.pathSnapshot}';
     } catch (_) {
-      return '';
+      return '—';
     }
   }
 
@@ -2644,7 +2567,7 @@ class _DeviceFormState extends State<_DeviceForm> {
                     onTap: () => setState(() {
                       _tipo   = t;
                       _pingOk = null;
-                      // [CAM-1] Autoseleccionar categoría y puerto según tipo
+                      // Autoseleccionar categoría y puerto según tipo
                       if (t == TipoD.camara) {
                         _cPuerto.text = '8888';
                         _cat = CatArtefacto.camara;
@@ -2845,7 +2768,7 @@ class _DeviceFormState extends State<_DeviceForm> {
               ],
               const SizedBox(height: 16),
 
-              // Preview URL principal
+              // Preview de URL
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -2857,38 +2780,37 @@ class _DeviceFormState extends State<_DeviceForm> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Row(children: [
-                      Icon(Icons.link_rounded,
-                          size: 12, color: C.blue),
-                      SizedBox(width: 6),
-                      Text('URL al encender:',
-                          style: TextStyle(
-                              fontSize:   10,
-                              fontWeight: FontWeight.w600,
-                              color:      C.blue)),
-                    ]),
-                    const SizedBox(height: 4),
-                    Text(_urlPreview,
-                        style: const TextStyle(
-                            fontSize:   11,
-                            color:      C.t2,
-                            fontFamily: 'monospace')),
-                    // [CAM-1] Mostrar URL del stream si es cámara
-                    if (_tipo == TipoD.camara &&
-                        _streamPreview.isNotEmpty) ...[
-                      const SizedBox(height: 8),
+                    if (_tipo != TipoD.camara) ...[
+                      const Row(children: [
+                        Icon(Icons.link_rounded,
+                            size: 12, color: C.blue),
+                        SizedBox(width: 6),
+                        Text('URL al encender:',
+                            style: TextStyle(
+                                fontSize:   10,
+                                fontWeight: FontWeight.w600,
+                                color:      C.blue)),
+                      ]),
+                      const SizedBox(height: 4),
+                      Text(_urlPreview,
+                          style: const TextStyle(
+                              fontSize:   11,
+                              color:      C.t2,
+                              fontFamily: 'monospace')),
+                    ],
+                    if (_tipo == TipoD.camara) ...[
                       const Row(children: [
                         Icon(Icons.videocam_rounded,
                             size: 12, color: C.cyan),
                         SizedBox(width: 6),
-                        Text('URL del stream MJPEG:',
+                        Text('URL de la foto de la cámara:',
                             style: TextStyle(
                                 fontSize:   10,
                                 fontWeight: FontWeight.w600,
                                 color:      C.cyan)),
                       ]),
                       const SizedBox(height: 4),
-                      Text(_streamPreview,
+                      Text(_snapshotPreview,
                           style: const TextStyle(
                               fontSize:   11,
                               color:      C.t2,
@@ -3206,15 +3128,16 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
     _log('Firmware:    ${d.tipo.label}', null);
     _log('Modo:        ${d.modo.label}', null);
     _log('Conexión:    ${d.conexionDisplay}', null);
-    if (d.tipo.esCamara) {
-      _log('Stream MJPEG: ${d.urlStream}', null);
-    }
     if (demo) {
       _log('⚠ Modo DEMO activo — simulando respuestas', null);
     }
     _log('─────────────────────────────', null);
-    _log('URL ON:  ${d.urlOn}', null);
-    _log('URL OFF: ${d.urlOff}', null);
+    if (d.tipo.esCamara) {
+      _log('URL foto: ${d.urlSnapshot}', null);
+    } else {
+      _log('URL ON:  ${d.urlOn}', null);
+      _log('URL OFF: ${d.urlOff}', null);
+    }
     _log('─────────────────────────────', null);
 
     // Ping base
@@ -3253,75 +3176,72 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
 
     _log('─────────────────────────────', null);
 
-    // Probar paths ON
-    _log('▶ Buscando ruta ON válida (${d.urlsOnFallback.length} paths)...', null);
-    if (demo) {
-      await Future.delayed(const Duration(milliseconds: 300));
-      _log('  [DEMO] ${d.urlOn} → OK ✓', true);
-    } else {
-      bool foundOn = false;
-      for (final url in d.urlsOnFallback) {
-        _log('  GET $url', null);
-        try {
-          final resp = await http
-              .get(Uri.parse(url))
-              .timeout(AppConfig.pingTimeout);
-          final ok =
-              resp.statusCode >= 200 && resp.statusCode < 300;
-          _log(
-            '  → HTTP ${resp.statusCode} ${ok ? "✓ RUTA CORRECTA" : "(404 — siguiente...)"}',
-            ok ? true : null,
-          );
-          if (ok) {
-            foundOn = true;
-            break;
-          }
-        } on TimeoutException {
-          _log('  → TIMEOUT', false);
-          break;
-        } catch (_) {
-          _log('  → Sin respuesta HTTP', null);
-        }
-      }
-      if (!foundOn) {
-        _log('  ⚠ Ningún path ON respondió con 2xx', false);
-      }
-    }
-
-    _log('─────────────────────────────', null);
-
-    // [CAM-1] Si es cámara, probar también el stream
     if (d.tipo.esCamara) {
-      _log('▶ Verificando endpoint de stream MJPEG...', null);
+      // Cámara: verificar la foto
+      _log('▶ Verificando foto de la cámara...', null);
       if (demo) {
         await Future.delayed(const Duration(milliseconds: 300));
-        _log('  [DEMO] ${d.urlStream} → OK ✓', true);
+        _log('  [DEMO] ${d.urlSnapshot} → OK ✓', true);
       } else {
         try {
-          final client  = http.Client();
-          final request = http.Request('GET', Uri.parse(d.urlStream));
-          final resp    = await client
-              .send(request)
+          final resp = await http
+              .get(Uri.parse(d.urlSnapshot))
               .timeout(AppConfig.pingTimeout);
           final ok = resp.statusCode >= 200 && resp.statusCode < 300;
           _log(
-            '  GET ${d.urlStream} → HTTP ${resp.statusCode} ${ok ? "✓ Stream disponible" : "— no disponible"}',
+            '  GET ${d.urlSnapshot} → HTTP ${resp.statusCode} ${ok ? "✓ Foto disponible (${resp.bodyBytes.length} bytes)" : "— no disponible"}',
             ok,
           );
-          client.close();
           if (ok) {
             _log('  Content-Type: ${resp.headers["content-type"] ?? "desconocido"}', null);
+          } else {
+            _log('  → Revisa el permiso de cámara en Web Remote Droid', false);
           }
         } on TimeoutException {
-          _log('  → TIMEOUT al conectar al stream', false);
+          _log('  → TIMEOUT al pedir la foto', false);
         } catch (e) {
           _log('  → ERROR: $e', false);
         }
       }
-      _log('─────────────────────────────', null);
+    } else {
+      // Otros: probar paths ON
+      _log('▶ Buscando ruta ON válida (${d.urlsOnFallback.length} paths)...', null);
+      if (demo) {
+        await Future.delayed(const Duration(milliseconds: 300));
+        _log('  [DEMO] ${d.urlOn} → OK ✓', true);
+      } else {
+        bool foundOn = false;
+        for (final url in d.urlsOnFallback) {
+          _log('  GET $url', null);
+          try {
+            final resp = await http
+                .get(Uri.parse(url))
+                .timeout(AppConfig.pingTimeout);
+            final ok =
+                resp.statusCode >= 200 && resp.statusCode < 300;
+            _log(
+              '  → HTTP ${resp.statusCode} ${ok ? "✓ RUTA CORRECTA" : "(404 — siguiente...)"}',
+              ok ? true : null,
+            );
+            if (ok) {
+              foundOn = true;
+              break;
+            }
+          } on TimeoutException {
+            _log('  → TIMEOUT', false);
+            break;
+          } catch (_) {
+            _log('  → Sin respuesta HTTP', null);
+          }
+        }
+        if (!foundOn) {
+          _log('  ⚠ Ningún path ON respondió con 2xx', false);
+        }
+      }
     }
 
-    _log('✓ Diagnóstico completo — relay NO fue activado', true);
+    _log('─────────────────────────────', null);
+    _log('✓ Diagnóstico completo — el dispositivo NO fue activado', true);
     if (mounted) setState(() => _running = false);
   }
 
