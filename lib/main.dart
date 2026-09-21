@@ -1,23 +1,27 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  DOMÓTICA PRO  v5.4  —  Producción                              ║
+// ║  DOMÓTICA PRO  v5.5  —  Producción                              ║
 // ╚══════════════════════════════════════════════════════════════════╝
 //
-// NOVEDADES v5.4:
-//  [CAM-A] Web Remote Droid NO entrega stream MJPEG: solo fotos en
-//          /camera/{index}/picture. La cámara ahora se ve pidiendo una
-//          foto cada ~700 ms (SnapshotWidget).
-//  [CAM-B] Encender/apagar una cámara ya no envía comandos de red:
-//          solo activa/desactiva la vista.
-//  [CAM-C] Diagnóstico de cámara verifica la foto (/camera/0/picture).
-//  Luz del celular: /flash/on y /flash/off (sin cambios).
+// NOVEDADES v5.5:
+//  [IPC-1] Nuevo tipo TipoD.ipcam — app "Android IP Camera" (puerto 4444).
+//          Video MJPEG : /video/m.jpeg  (o /video/mjpeg según versión)
+//          Audio en vivo: /audio         (WAV)
+//          Foto         : /video/snapshot
+//          Linterna     : /?torch=on  |  /?torch=off
+//  [IPC-2] Usuario y contraseña (Basic Auth) por dispositivo.
+//  [IPC-3] CamaraPage: botones Ver/Detener, Escuchar, Linterna, Diagnóstico.
+//  Se mantiene TipoD.camara (Web Remote Droid, fotos periódicas) y
+//  TipoD.celular (flash /flash/on, /flash/off).
 //
 // Requisitos Android: permiso INTERNET y usesCleartextTraffic="true".
+// Requiere el paquete just_audio en pubspec.yaml.
 
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ════════════════════════════════════════════════════════════════
@@ -86,7 +90,7 @@ extension ModoConexionX on ModoConexion {
         ModoConexion.url   => 'https://mi-tunel.ngrok.io',
       };
   String get descripcion => switch (this) {
-        ModoConexion.lan   => 'Misma red WiFi. IP privada (192.168.x.x).',
+        ModoConexion.lan   => 'Misma red WiFi. IP privada (192.168.x.x, 10.x.x.x).',
         ModoConexion.movil => 'Cualquier red. IP pública, Tailscale (100.x.x.x) o puerto abierto.',
         ModoConexion.url   => 'URL completa. Túneles ngrok, Cloudflare, DDNS.',
       };
@@ -107,7 +111,8 @@ extension ModoConexionX on ModoConexion {
 // ════════════════════════════════════════════════════════════════
 // ENUMS DISPOSITIVO
 // ════════════════════════════════════════════════════════════════
-enum TipoD { tasmota, sonoff, shelly, celular, camara, otro }
+// camara = Web Remote Droid (fotos) · ipcam = Android IP Camera (video+audio)
+enum TipoD { tasmota, sonoff, shelly, celular, camara, ipcam, otro }
 
 extension TipoDX on TipoD {
   String get label => switch (this) {
@@ -115,7 +120,8 @@ extension TipoDX on TipoD {
         TipoD.sonoff  => 'Sonoff',
         TipoD.shelly  => 'Shelly',
         TipoD.celular => 'Celular (flash)',
-        TipoD.camara  => 'Cámara IP',
+        TipoD.camara  => 'Cámara (Web Remote Droid)',
+        TipoD.ipcam   => 'Android IP Camera',
         TipoD.otro    => 'Genérico',
       };
   IconData get icon => switch (this) {
@@ -123,7 +129,8 @@ extension TipoDX on TipoD {
         TipoD.sonoff  => Icons.bolt_rounded,
         TipoD.shelly  => Icons.router_rounded,
         TipoD.celular => Icons.smartphone_rounded,
-        TipoD.camara  => Icons.videocam_rounded,
+        TipoD.camara  => Icons.photo_camera_rounded,
+        TipoD.ipcam   => Icons.videocam_rounded,
         TipoD.otro    => Icons.settings_input_hdmi_rounded,
       };
   Color get color => switch (this) {
@@ -132,6 +139,7 @@ extension TipoDX on TipoD {
         TipoD.shelly  => C.green,
         TipoD.celular => C.yellow,
         TipoD.camara  => C.cyan,
+        TipoD.ipcam   => C.cyan,
         TipoD.otro    => C.t2,
       };
 
@@ -142,6 +150,7 @@ extension TipoDX on TipoD {
         TipoD.shelly  => '/relay/0?turn=on',
         TipoD.celular => '/flash/on',
         TipoD.camara  => '/',
+        TipoD.ipcam   => '/',
         TipoD.otro    => '/on',
       };
   String get pathOff => switch (this) {
@@ -150,15 +159,25 @@ extension TipoDX on TipoD {
         TipoD.shelly  => '/relay/0?turn=off',
         TipoD.celular => '/flash/off',
         TipoD.camara  => '/',
+        TipoD.ipcam   => '/',
         TipoD.otro    => '/off',
       };
 
-  // Web Remote Droid: foto en /camera/{index}/picture (0 = primera cámara)
-  String get pathSnapshot => '/camera/0/picture';
+  // Foto
+  String get pathSnapshot => switch (this) {
+        TipoD.ipcam => '/video/snapshot',
+        _           => '/camera/0/picture', // Web Remote Droid
+      };
+
+  // Video MJPEG (solo ipcam). Se prueban en orden.
+  List<String> get pathsStream =>
+      this == TipoD.ipcam ? ['/video/m.jpeg', '/video/mjpeg'] : const [];
+
+  // Audio en vivo (solo ipcam)
+  String get pathAudio => '/audio';
 
   List<String> get pathsOnFallback => switch (this) {
         TipoD.celular => ['/flash/on', '/?action=on', '/flash?on=1'],
-        TipoD.camara  => ['/'],
         TipoD.tasmota => ['/cm?cmnd=Power+On', '/cm?cmnd=Power1+On'],
         TipoD.shelly  => ['/relay/0?turn=on', '/rpc/Switch.Set?id=0&on=true'],
         _ => [pathOn],
@@ -166,13 +185,20 @@ extension TipoDX on TipoD {
 
   List<String> get pathsOffFallback => switch (this) {
         TipoD.celular => ['/flash/off', '/?action=off', '/flash?on=0'],
-        TipoD.camara  => ['/'],
         TipoD.tasmota => ['/cm?cmnd=Power+Off', '/cm?cmnd=Power1+Off'],
         TipoD.shelly  => ['/relay/0?turn=off', '/rpc/Switch.Set?id=0&on=false'],
         _ => [pathOff],
       };
 
-  bool get esCamara => this == TipoD.camara;
+  bool get esCamara  => this == TipoD.camara || this == TipoD.ipcam;
+  bool get usaStream => this == TipoD.ipcam;
+
+  int get puertoDefault => switch (this) {
+        TipoD.camara  => 8888,
+        TipoD.celular => 8888,
+        TipoD.ipcam   => 4444,
+        _             => 80,
+      };
 
   static TipoD fromStr(String s) => TipoD.values
       .firstWhere((e) => e.name == s.toLowerCase(), orElse: () => TipoD.otro);
@@ -248,6 +274,8 @@ class Dispositivo {
   int          puerto;
   String       urlBase;
   String       habitacion;
+  String       usuario;
+  String       clave;
   bool         encendido;
   DateTime?    ultimaAccion;
   int          toggleCount;
@@ -263,6 +291,8 @@ class Dispositivo {
     this.puerto     = 80,
     this.urlBase    = '',
     this.habitacion = 'General',
+    this.usuario    = '',
+    this.clave      = '',
     this.encendido  = false,
     this.ultimaAccion,
     this.toggleCount = 0,
@@ -279,11 +309,21 @@ class Dispositivo {
     }
   }
 
+  // Cabeceras de autenticación Basic (vacío si no hay usuario)
+  Map<String, String> get authHeaders {
+    if (usuario.trim().isEmpty) return const {};
+    final cred = base64Encode(utf8.encode('${usuario.trim()}:$clave'));
+    return {'Authorization': 'Basic $cred'};
+  }
+
   String get urlOn  => '$_base${tipo.pathOn}';
   String get urlOff => '$_base${tipo.pathOff}';
 
-  // URL de la foto de la cámara
   String get urlSnapshot => '$_base${tipo.pathSnapshot}';
+  List<String> get urlsStream =>
+      tipo.pathsStream.map((p) => '$_base$p').toList();
+  String get urlAudio => '$_base${tipo.pathAudio}';
+  String urlTorch(bool on) => '$_base/?torch=${on ? "on" : "off"}';
 
   List<String> get urlsOnFallback  =>
       tipo.pathsOnFallback.map((p) => '$_base$p').toList();
@@ -310,6 +350,8 @@ class Dispositivo {
         'puerto':      puerto,
         'urlBase':     urlBase,
         'habitacion':  habitacion,
+        'usuario':     usuario,
+        'clave':       clave,
         'encendido':   encendido,
         'toggleCount': toggleCount,
         'ultimaAccion': ultimaAccion?.toIso8601String(),
@@ -325,6 +367,8 @@ class Dispositivo {
         puerto:      j['puerto']      as int?    ?? 80,
         urlBase:     j['urlBase']     as String? ?? '',
         habitacion:  j['habitacion']  as String? ?? 'General',
+        usuario:     j['usuario']     as String? ?? '',
+        clave:       j['clave']       as String? ?? '',
         encendido:   j['encendido']   as bool?   ?? false,
         toggleCount: j['toggleCount'] as int?    ?? 0,
       );
@@ -338,6 +382,8 @@ class Dispositivo {
     int?          puerto,
     String?       urlBase,
     String?       habitacion,
+    String?       usuario,
+    String?       clave,
     bool?         encendido,
     DateTime?     ultimaAccion,
     int?          toggleCount,
@@ -353,6 +399,8 @@ class Dispositivo {
         puerto:       puerto      ?? this.puerto,
         urlBase:      urlBase     ?? this.urlBase,
         habitacion:   habitacion  ?? this.habitacion,
+        usuario:      usuario     ?? this.usuario,
+        clave:        clave       ?? this.clave,
         encendido:    encendido   ?? this.encendido,
         ultimaAccion: ultimaAccion ?? this.ultimaAccion,
         toggleCount:  toggleCount ?? this.toggleCount,
@@ -528,7 +576,7 @@ class DispositivosNotifier extends ChangeNotifier {
   void _fireAndForget(Dispositivo d, bool encender) {
     final url = encender ? d.urlOn : d.urlOff;
     http
-        .get(Uri.parse(url))
+        .get(Uri.parse(url), headers: d.authHeaders)
         .timeout(AppConfig.cmdTimeout)
         .then((_) {})
         .catchError((_) {
@@ -556,6 +604,8 @@ class DispositivosNotifier extends ChangeNotifier {
     required int          puerto,
     required String       urlBase,
     required String       habitacion,
+    String usuario = '',
+    String clave   = '',
     bool skipPing = true,
   }) async {
     if (!skipPing) {
@@ -574,6 +624,8 @@ class DispositivosNotifier extends ChangeNotifier {
       puerto:     puerto,
       urlBase:    urlBase.trim(),
       habitacion: hab,
+      usuario:    usuario.trim(),
+      clave:      clave,
     ));
     _addLog('Dispositivo "${nombre.trim()}" agregado', ok: true);
     if (hasListeners) notifyListeners();
@@ -591,6 +643,8 @@ class DispositivosNotifier extends ChangeNotifier {
     required int          puerto,
     required String       urlBase,
     required String       habitacion,
+    String usuario = '',
+    String clave   = '',
   }) {
     final idx = _items.indexWhere((d) => d.id == id);
     if (idx == -1) return;
@@ -604,6 +658,8 @@ class DispositivosNotifier extends ChangeNotifier {
       puerto:     puerto,
       urlBase:    urlBase.trim(),
       habitacion: hab,
+      usuario:    usuario.trim(),
+      clave:      clave,
     );
     _addLog('Dispositivo "${nombre.trim()}" actualizado', ok: true);
     if (hasListeners) notifyListeners();
@@ -848,17 +904,245 @@ class _BottomNav extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════════════
-// [CAM-A] SNAPSHOT WIDGET — "video" pidiendo fotos periódicas
+// MJPEG WIDGET — video en vivo (Android IP Camera)
+// ════════════════════════════════════════════════════════════════
+/// Lee un stream multipart/x-mixed-replace (MJPEG) y muestra cada
+/// frame JPEG. Prueba las [urls] en orden hasta que una responda 2xx.
+class MjpegWidget extends StatefulWidget {
+  final List<String>        urls;
+  final Map<String, String> headers;
+  final BoxFit              fit;
+  const MjpegWidget({
+    super.key,
+    required this.urls,
+    this.headers = const {},
+    this.fit = BoxFit.contain,
+  });
+
+  @override
+  State<MjpegWidget> createState() => _MjpegWidgetState();
+}
+
+class _MjpegWidgetState extends State<MjpegWidget> {
+  http.Client?        _client;
+  StreamSubscription? _sub;
+  Uint8List?          _frame;
+  String?             _error;
+  bool                _connecting = true;
+
+  static final _soiMarker = Uint8List.fromList([0xFF, 0xD8]);
+  static final _eoiMarker = Uint8List.fromList([0xFF, 0xD9]);
+
+  @override
+  void initState() {
+    super.initState();
+    _connect();
+  }
+
+  @override
+  void didUpdateWidget(MjpegWidget old) {
+    super.didUpdateWidget(old);
+    if (old.urls.join('|') != widget.urls.join('|')) {
+      _disconnect();
+      _connect();
+    }
+  }
+
+  Future<void> _connect() async {
+    if (!mounted) return;
+    setState(() {
+      _connecting = true;
+      _error      = null;
+      _frame      = null;
+    });
+
+    String lastErr = 'Sin URL de video';
+    for (final url in widget.urls) {
+      final client = http.Client();
+      try {
+        final request = http.Request('GET', Uri.parse(url))
+          ..headers.addAll(widget.headers);
+        final response = await client
+            .send(request)
+            .timeout(const Duration(seconds: 10));
+
+        if (!mounted) {
+          client.close();
+          return;
+        }
+
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          _client = client;
+          setState(() => _connecting = false);
+
+          final buf = <int>[];
+          _sub = response.stream.listen(
+            (chunk) {
+              buf.addAll(chunk);
+              _extractFrames(buf);
+              // Protección: si crece demasiado sin frames, limpiar
+              if (buf.length > 4 * 1024 * 1024) buf.clear();
+            },
+            onError: (e) {
+              if (mounted) setState(() => _error = 'Error de stream: $e');
+            },
+            onDone: () {
+              if (mounted) setState(() => _error = 'Stream terminado');
+            },
+          );
+          return;
+        }
+
+        client.close();
+        if (response.statusCode == 401 || response.statusCode == 403) {
+          lastErr = 'HTTP ${response.statusCode}: usuario o contraseña incorrectos';
+          break;
+        }
+        lastErr = 'HTTP ${response.statusCode} en $url';
+      } catch (e) {
+        client.close();
+        lastErr = e is TimeoutException
+            ? 'Tiempo de espera agotado al conectar'
+            : e.toString();
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _connecting = false;
+        _error      = lastErr;
+      });
+    }
+  }
+
+  /// Extrae los frames JPEG completos (FFD8 … FFD9) del buffer.
+  void _extractFrames(List<int> buf) {
+    while (true) {
+      final start = _indexOf(buf, _soiMarker, 0);
+      if (start == -1) {
+        buf.clear();
+        break;
+      }
+      final end = _indexOf(buf, _eoiMarker, start + 2);
+      if (end == -1) {
+        if (start > 0) buf.removeRange(0, start);
+        break;
+      }
+      final frameEnd = end + 2;
+      final frame    = Uint8List.fromList(buf.sublist(start, frameEnd));
+      buf.removeRange(0, frameEnd);
+      if (mounted) {
+        setState(() => _frame = frame);
+      }
+    }
+  }
+
+  int _indexOf(List<int> data, Uint8List pattern, int from) {
+    outer:
+    for (int i = from; i <= data.length - pattern.length; i++) {
+      for (int j = 0; j < pattern.length; j++) {
+        if (data[i + j] != pattern[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
+  void _disconnect() {
+    _sub?.cancel();
+    _client?.close();
+    _sub    = null;
+    _client = null;
+  }
+
+  @override
+  void dispose() {
+    _disconnect();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_connecting) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: C.cyan, strokeWidth: 2),
+            SizedBox(height: 16),
+            Text('Conectando a la cámara...',
+                style: TextStyle(color: C.t2, fontSize: 13)),
+          ],
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.videocam_off_rounded,
+                  size: 48, color: C.red),
+              const SizedBox(height: 16),
+              const Text('Sin señal de cámara',
+                  style: TextStyle(
+                      color: C.t1,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              Text(_error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: C.t3, fontSize: 12)),
+              const SizedBox(height: 20),
+              OutlinedButton.icon(
+                onPressed: () {
+                  _disconnect();
+                  _connect();
+                },
+                icon:  const Icon(Icons.refresh_rounded, color: C.cyan),
+                label: const Text('Reintentar',
+                    style: TextStyle(color: C.cyan)),
+                style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: C.cyan)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_frame == null) {
+      return const Center(
+        child: Text('Esperando primer cuadro...',
+            style: TextStyle(color: C.t3, fontSize: 12)),
+      );
+    }
+
+    return Image.memory(
+      _frame!,
+      fit:             widget.fit,
+      gaplessPlayback: true,
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// SNAPSHOT WIDGET — "video" pidiendo fotos periódicas
 // ════════════════════════════════════════════════════════════════
 /// Pide una foto a [url] cada [interval] y la muestra. Sirve para
 /// Web Remote Droid (/camera/0/picture), que no ofrece stream MJPEG.
 class SnapshotWidget extends StatefulWidget {
-  final String   url;
-  final Duration interval;
-  final BoxFit   fit;
+  final String              url;
+  final Map<String, String> headers;
+  final Duration            interval;
+  final BoxFit              fit;
   const SnapshotWidget({
     super.key,
     required this.url,
+    this.headers = const {},
     this.interval = AppConfig.snapInterval,
     this.fit = BoxFit.contain,
   });
@@ -897,7 +1181,8 @@ class _SnapshotWidgetState extends State<SnapshotWidget> {
     _loading = true;
     try {
       final r = await http
-          .get(Uri.parse('${widget.url}?quality=60&scale=0.7'))
+          .get(Uri.parse('${widget.url}?quality=60&scale=0.7'),
+              headers: widget.headers)
           .timeout(const Duration(seconds: 6));
       if (r.statusCode < 200 || r.statusCode >= 300) {
         throw Exception('HTTP ${r.statusCode}');
@@ -914,7 +1199,6 @@ class _SnapshotWidgetState extends State<SnapshotWidget> {
       }
     } catch (e) {
       _fails++;
-      // Mostrar el error solo si fallan varios intentos seguidos
       if (mounted && (_frame == null || _fails >= 3)) {
         setState(() => _error = e.toString());
       }
@@ -952,7 +1236,7 @@ class _SnapshotWidgetState extends State<SnapshotWidget> {
                   style: const TextStyle(color: C.t3, fontSize: 12)),
               const SizedBox(height: 8),
               const Text(
-                  'Revisa que Web Remote Droid esté abierto y con permiso de cámara.',
+                  'Revisa que la app de la cámara esté abierta y con permiso de cámara.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: C.t3, fontSize: 11)),
             ],
@@ -1007,7 +1291,7 @@ class _SnapshotWidgetState extends State<SnapshotWidget> {
 }
 
 // ════════════════════════════════════════════════════════════════
-// CAMARA PAGE — pantalla completa con vista y controles
+// CAMARA PAGE — pantalla completa con vista, audio y linterna
 // ════════════════════════════════════════════════════════════════
 class CamaraPage extends StatefulWidget {
   final Dispositivo          d;
@@ -1020,15 +1304,22 @@ class CamaraPage extends StatefulWidget {
 
 class _CamaraPageState extends State<CamaraPage> {
   late Dispositivo _d;
-  bool _controlsVisible = true;
+  bool   _controlsVisible = true;
   Timer? _hideTimer;
+
+  // Audio
+  final AudioPlayer _player = AudioPlayer();
+  bool _audioOn      = false;
+  bool _audioLoading = false;
+
+  // Linterna
+  bool _torchOn = false;
 
   @override
   void initState() {
     super.initState();
     _d = widget.d;
     _scheduleHide();
-    // Si la cámara no está activa, activar la vista automáticamente
     if (!_d.encendido) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _setCamara(true));
     }
@@ -1037,12 +1328,13 @@ class _CamaraPageState extends State<CamaraPage> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _player.dispose();
     super.dispose();
   }
 
   void _scheduleHide() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 4), () {
+    _hideTimer = Timer(const Duration(seconds: 5), () {
       if (mounted) setState(() => _controlsVisible = false);
     });
   }
@@ -1059,16 +1351,80 @@ class _CamaraPageState extends State<CamaraPage> {
     if (actual.encendido != encender) {
       widget.notifier.toggle(_d.id);
     }
+    if (!encender && _audioOn) {
+      await _player.stop();
+      _audioOn = false;
+    }
     final updated = widget.notifier.items
         .firstWhere((x) => x.id == _d.id, orElse: () => _d);
     if (mounted) setState(() => _d = updated);
   }
 
+  Future<void> _toggleAudio(Dispositivo d) async {
+    if (_audioLoading) return;
+    if (_audioOn) {
+      await _player.stop();
+      if (mounted) setState(() => _audioOn = false);
+      return;
+    }
+    setState(() => _audioLoading = true);
+    try {
+      final headers = d.authHeaders;
+      await _player.setAudioSource(
+        AudioSource.uri(
+          Uri.parse(d.urlAudio),
+          headers: headers.isEmpty ? null : headers,
+        ),
+      );
+      unawaited(_player.play());
+      if (mounted) setState(() => _audioOn = true);
+    } catch (e) {
+      if (mounted) {
+        snack(context, 'No se pudo reproducir el audio: $e', error: true);
+      }
+    } finally {
+      if (mounted) setState(() => _audioLoading = false);
+    }
+  }
+
+  Future<void> _toggleTorch(Dispositivo d) async {
+    final nuevo = !_torchOn;
+    try {
+      final r = await http
+          .get(Uri.parse(d.urlTorch(nuevo)), headers: d.authHeaders)
+          .timeout(AppConfig.cmdTimeout);
+      if (r.statusCode >= 200 && r.statusCode < 300) {
+        if (mounted) setState(() => _torchOn = nuevo);
+      } else if (mounted) {
+        snack(context, 'Linterna: HTTP ${r.statusCode}', error: true);
+      }
+    } catch (e) {
+      if (mounted) snack(context, 'Linterna: $e', error: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Mantener estado sincronizado con el notifier
     final dActual = widget.notifier.items
         .firstWhere((x) => x.id == _d.id, orElse: () => _d);
+    final esIpCam = dActual.tipo.usaStream;
+
+    Widget vista;
+    if (!dActual.encendido) {
+      vista = const _CamaraApagada();
+    } else if (esIpCam) {
+      vista = MjpegWidget(
+        key:     ValueKey(dActual.urlsStream.join('|')),
+        urls:    dActual.urlsStream,
+        headers: dActual.authHeaders,
+      );
+    } else {
+      vista = SnapshotWidget(
+        key:     ValueKey(dActual.urlSnapshot),
+        url:     dActual.urlSnapshot,
+        headers: dActual.authHeaders,
+      );
+    }
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -1076,14 +1432,7 @@ class _CamaraPageState extends State<CamaraPage> {
         // ── 1. Vista de la cámara ──────────────────────────────
         GestureDetector(
           onTap: _showControls,
-          child: SizedBox.expand(
-            child: dActual.encendido
-                ? SnapshotWidget(
-                    key: ValueKey(dActual.urlSnapshot),
-                    url: dActual.urlSnapshot,
-                  )
-                : const _CamaraApagada(),
-          ),
+          child: SizedBox.expand(child: vista),
         ),
 
         // ── 2. Gradiente superior ──────────────────────────────
@@ -1144,7 +1493,7 @@ class _CamaraPageState extends State<CamaraPage> {
                           const SizedBox(width: 5),
                           Text(
                             dActual.encendido
-                                ? 'En vivo'
+                                ? (_audioOn ? 'En vivo · con audio' : 'En vivo')
                                 : 'Cámara apagada',
                             style: TextStyle(
                                 color: dActual.encendido
@@ -1156,7 +1505,6 @@ class _CamaraPageState extends State<CamaraPage> {
                       ],
                     ),
                   ),
-                  // Badge de conexión
                   Flexible(
                     child: Container(
                       padding: const EdgeInsets.symmetric(
@@ -1192,7 +1540,7 @@ class _CamaraPageState extends State<CamaraPage> {
             child: Align(
               alignment: Alignment.bottomCenter,
               child: Container(
-                height: 160,
+                height: 170,
                 decoration: const BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.bottomCenter,
@@ -1215,9 +1563,11 @@ class _CamaraPageState extends State<CamaraPage> {
               alignment: Alignment.bottomCenter,
               child: SafeArea(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                  child: Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 20,
+                    runSpacing: 14,
                     children: [
                       _CamControlBtn(
                         icon: dActual.encendido
@@ -1229,7 +1579,26 @@ class _CamaraPageState extends State<CamaraPage> {
                         color: dActual.encendido ? C.red : C.cyan,
                         onTap: () => _setCamara(!dActual.encendido),
                       ),
-                      const SizedBox(width: 24),
+                      if (esIpCam && dActual.encendido)
+                        _CamControlBtn(
+                          icon: _audioLoading
+                              ? Icons.hourglass_top_rounded
+                              : (_audioOn
+                                  ? Icons.volume_off_rounded
+                                  : Icons.volume_up_rounded),
+                          label: _audioOn ? 'Silenciar' : 'Escuchar',
+                          color: _audioOn ? C.orange : C.green,
+                          onTap: () => _toggleAudio(dActual),
+                        ),
+                      if (esIpCam && dActual.encendido)
+                        _CamControlBtn(
+                          icon: _torchOn
+                              ? Icons.flashlight_off_rounded
+                              : Icons.flashlight_on_rounded,
+                          label: _torchOn ? 'Apagar luz' : 'Linterna',
+                          color: C.yellow,
+                          onTap: () => _toggleTorch(dActual),
+                        ),
                       _CamControlBtn(
                         icon:  Icons.wifi_find_rounded,
                         label: 'Diagnóstico',
@@ -1349,7 +1718,6 @@ class ControlPage extends StatefulWidget {
 }
 
 class _ControlPageState extends State<ControlPage> {
-  // Redirige a CamaraPage si es tipo camara
   void _onCardTap(Dispositivo d) {
     if (d.tipo.esCamara) {
       Navigator.push(
@@ -1623,9 +1991,8 @@ class _ControlCard extends StatelessWidget {
                           fontWeight: FontWeight.w700,
                           color: d.encendido ? C.t1 : C.t2)),
                   const SizedBox(height: 4),
-                  Row(children: [
+                  Wrap(spacing: 6, runSpacing: 4, children: [
                     _MicroBadge(d.tipo.label, col: d.tipo.color),
-                    const SizedBox(width: 6),
                     _MicroBadge(d.habitacion, col: C.t3),
                   ]),
                   const SizedBox(height: 4),
@@ -2008,7 +2375,7 @@ class _DevTile extends StatelessWidget {
                       color:      d.encendido ? C.t1 : C.t2)),
               const SizedBox(height: 4),
               Row(children: [
-                _MicroBadge(d.tipo.label, col: col),
+                Flexible(child: _MicroBadge(d.tipo.label, col: col)),
                 const SizedBox(width: 6),
                 Text(d.encendido ? 'ON' : 'OFF',
                     style: TextStyle(
@@ -2226,7 +2593,7 @@ class _DispCardState extends State<_DispCard> {
                           fontWeight: FontWeight.w600,
                           color:      C.t1)),
                   const SizedBox(height: 4),
-                  Wrap(spacing: 6, children: [
+                  Wrap(spacing: 6, runSpacing: 4, children: [
                     _MicroBadge(d.tipo.label, col: col),
                     _MicroBadge(d.habitacion,  col: C.t2),
                     _MicroBadge(d.modo.label,  col: d.modo.color),
@@ -2381,12 +2748,15 @@ class _DeviceFormState extends State<_DeviceForm> {
   late final TextEditingController _cPuerto;
   late final TextEditingController _cUrl;
   late final TextEditingController _cHab;
+  late final TextEditingController _cUser;
+  late final TextEditingController _cPass;
 
   late TipoD        _tipo;
   late CatArtefacto _cat;
   late ModoConexion  _modo;
   bool  _saving  = false;
   bool  _pinging = false;
+  bool  _verClave = false;
   bool? _pingOk;
 
   bool get _isEdit => widget.edit != null;
@@ -2397,12 +2767,14 @@ class _DeviceFormState extends State<_DeviceForm> {
     final e  = widget.edit;
     _cNombre = TextEditingController(text: e?.nombre ?? '');
     _cIp     = TextEditingController(text: e?.ip ?? '');
-    _cPuerto =
-        TextEditingController(text: (e?.puerto ?? 8888).toString());
+    _cPuerto = TextEditingController(
+        text: (e?.puerto ?? TipoD.ipcam.puertoDefault).toString());
     _cUrl    = TextEditingController(text: e?.urlBase ?? '');
     _cHab    =
         TextEditingController(text: e?.habitacion ?? 'General');
-    _tipo    = e?.tipo ?? TipoD.camara;
+    _cUser   = TextEditingController(text: e?.usuario ?? '');
+    _cPass   = TextEditingController(text: e?.clave ?? '');
+    _tipo    = e?.tipo ?? TipoD.ipcam;
     _cat     = e?.cat  ?? CatArtefacto.camara;
     _modo    = e?.modo ?? ModoConexion.movil;
   }
@@ -2414,46 +2786,41 @@ class _DeviceFormState extends State<_DeviceForm> {
     _cPuerto.dispose();
     _cUrl.dispose();
     _cHab.dispose();
+    _cUser.dispose();
+    _cPass.dispose();
     super.dispose();
   }
 
-  String get _urlPreview {
-    try {
-      if (_modo == ModoConexion.url) {
-        final base =
-            _cUrl.text.trim().replaceAll(RegExp(r'/$'), '');
-        return base.isEmpty
-            ? '(ingresa la URL)'
-            : '$base${_tipo.pathOn}';
-      }
-      final ip = _cIp.text.trim();
-      final p  = _cPuerto.text.trim();
-      return ip.isEmpty
-          ? '(ingresa la IP)'
-          : 'http://$ip:$p${_tipo.pathOn}';
-    } catch (_) {
-      return '—';
+  String get _base {
+    if (_modo == ModoConexion.url) {
+      return _cUrl.text.trim().replaceAll(RegExp(r'/$'), '');
     }
+    final ip = _cIp.text.trim();
+    if (ip.isEmpty) return '';
+    return 'http://$ip:${_cPuerto.text.trim()}';
   }
 
-  // Preview de la URL de la foto de la cámara
-  String get _snapshotPreview {
-    try {
-      if (_modo == ModoConexion.url) {
-        final base =
-            _cUrl.text.trim().replaceAll(RegExp(r'/$'), '');
-        return base.isEmpty
-            ? '(ingresa la URL)'
-            : '$base${_tipo.pathSnapshot}';
-      }
-      final ip = _cIp.text.trim();
-      final p  = _cPuerto.text.trim();
-      return ip.isEmpty
-          ? '(ingresa la IP)'
-          : 'http://$ip:$p${_tipo.pathSnapshot}';
-    } catch (_) {
-      return '—';
+  String get _urlPreview {
+    final b = _base;
+    if (b.isEmpty) {
+      return _modo == ModoConexion.url
+          ? '(ingresa la URL)'
+          : '(ingresa la IP)';
     }
+    return '$b${_tipo.pathOn}';
+  }
+
+  // Preview de la URL de video (ipcam) o foto (camara)
+  String get _camPreview {
+    final b = _base;
+    if (b.isEmpty) {
+      return _modo == ModoConexion.url
+          ? '(ingresa la URL)'
+          : '(ingresa la IP)';
+    }
+    return _tipo.usaStream
+        ? '$b${_tipo.pathsStream.first}'
+        : '$b${_tipo.pathSnapshot}';
   }
 
   @override
@@ -2567,14 +2934,9 @@ class _DeviceFormState extends State<_DeviceForm> {
                     onTap: () => setState(() {
                       _tipo   = t;
                       _pingOk = null;
-                      // Autoseleccionar categoría y puerto según tipo
-                      if (t == TipoD.camara) {
-                        _cPuerto.text = '8888';
-                        _cat = CatArtefacto.camara;
-                      } else if (t == TipoD.celular) {
-                        _cPuerto.text = '8888';
-                      } else if (_modo != ModoConexion.url) {
-                        _cPuerto.text = '80';
+                      if (t.esCamara) _cat = CatArtefacto.camara;
+                      if (_modo != ModoConexion.url) {
+                        _cPuerto.text = t.puertoDefault.toString();
                       }
                     }),
                     child: AnimatedContainer(
@@ -2616,10 +2978,8 @@ class _DeviceFormState extends State<_DeviceForm> {
                   onTap: () => setState(() {
                     _modo   = m;
                     _pingOk = null;
-                    if (m != ModoConexion.url &&
-                        (_tipo == TipoD.celular ||
-                         _tipo == TipoD.camara)) {
-                      _cPuerto.text = '8888';
+                    if (m != ModoConexion.url) {
+                      _cPuerto.text = _tipo.puertoDefault.toString();
                     }
                   }),
                   child: AnimatedContainer(
@@ -2711,9 +3071,11 @@ class _DeviceFormState extends State<_DeviceForm> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        _tipo == TipoD.camara || _tipo == TipoD.celular
-                            ? 'Abre Web Remote Droid en el otro celular y copia la IP que muestra en la pantalla principal'
-                            : 'Busca la IP en la interfaz web del dispositivo o en tu router',
+                        _tipo == TipoD.ipcam
+                            ? 'En Android IP Camera usa TLS "solo HTTP" y configura usuario y contraseña. Puerto 4444.'
+                            : _tipo.esCamara || _tipo == TipoD.celular
+                                ? 'Abre Web Remote Droid en el otro celular y copia la IP que muestra en la pantalla principal'
+                                : 'Busca la IP en la interfaz web del dispositivo o en tu router',
                         style: const TextStyle(
                             fontSize: 10, color: C.orange),
                       ),
@@ -2748,12 +3110,9 @@ class _DeviceFormState extends State<_DeviceForm> {
                   controller: _cPuerto,
                   keyboardType: TextInputType.number,
                   style: const TextStyle(color: C.t1),
+                  onChanged: (_) => setState(() {}),
                   decoration: InputDecoration(
-                      hintText:
-                          (_tipo == TipoD.celular ||
-                           _tipo == TipoD.camara)
-                              ? '8888'
-                              : '80'),
+                      hintText: _tipo.puertoDefault.toString()),
                   validator: (v) {
                     if (v == null || v.trim().isEmpty) {
                       return 'Requerido';
@@ -2764,6 +3123,42 @@ class _DeviceFormState extends State<_DeviceForm> {
                     }
                     return null;
                   },
+                ),
+              ],
+
+              // Usuario y contraseña (cámaras)
+              if (_tipo.esCamara) ...[
+                const SizedBox(height: 12),
+                const _Lbl('Usuario (opcional)'),
+                TextFormField(
+                  controller: _cUser,
+                  style: const TextStyle(color: C.t1),
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration:
+                      const InputDecoration(hintText: 'usuario'),
+                ),
+                const SizedBox(height: 12),
+                const _Lbl('Contraseña (opcional)'),
+                TextFormField(
+                  controller: _cPass,
+                  style: const TextStyle(color: C.t1),
+                  obscureText: !_verClave,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: InputDecoration(
+                    hintText: 'contraseña',
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                          _verClave
+                              ? Icons.visibility_off_rounded
+                              : Icons.visibility_rounded,
+                          color: C.t3,
+                          size: 18),
+                      onPressed: () =>
+                          setState(() => _verClave = !_verClave),
+                    ),
+                  ),
                 ),
               ],
               const SizedBox(height: 16),
@@ -2780,7 +3175,7 @@ class _DeviceFormState extends State<_DeviceForm> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (_tipo != TipoD.camara) ...[
+                    if (!_tipo.esCamara) ...[
                       const Row(children: [
                         Icon(Icons.link_rounded,
                             size: 12, color: C.blue),
@@ -2798,19 +3193,22 @@ class _DeviceFormState extends State<_DeviceForm> {
                               color:      C.t2,
                               fontFamily: 'monospace')),
                     ],
-                    if (_tipo == TipoD.camara) ...[
-                      const Row(children: [
-                        Icon(Icons.videocam_rounded,
+                    if (_tipo.esCamara) ...[
+                      Row(children: [
+                        const Icon(Icons.videocam_rounded,
                             size: 12, color: C.cyan),
-                        SizedBox(width: 6),
-                        Text('URL de la foto de la cámara:',
-                            style: TextStyle(
+                        const SizedBox(width: 6),
+                        Text(
+                            _tipo.usaStream
+                                ? 'URL del video:'
+                                : 'URL de la foto:',
+                            style: const TextStyle(
                                 fontSize:   10,
                                 fontWeight: FontWeight.w600,
                                 color:      C.cyan)),
                       ]),
                       const SizedBox(height: 4),
-                      Text(_snapshotPreview,
+                      Text(_camPreview,
                           style: const TextStyle(
                               fontSize:   11,
                               color:      C.t2,
@@ -2904,7 +3302,7 @@ class _DeviceFormState extends State<_DeviceForm> {
     final ok = await NetCtrl.ping(
       modo:    _modo,
       ip:      _cIp.text.trim(),
-      puerto:  int.tryParse(_cPuerto.text.trim()) ?? 8888,
+      puerto:  int.tryParse(_cPuerto.text.trim()) ?? _tipo.puertoDefault,
       urlBase: _cUrl.text.trim(),
     );
     if (mounted) {
@@ -2919,6 +3317,11 @@ class _DeviceFormState extends State<_DeviceForm> {
     if (!_fk.currentState!.validate()) return;
     setState(() => _saving = true);
 
+    final puerto =
+        int.tryParse(_cPuerto.text.trim()) ?? _tipo.puertoDefault;
+    final usuario = _tipo.esCamara ? _cUser.text : '';
+    final clave   = _tipo.esCamara ? _cPass.text : '';
+
     if (_isEdit) {
       widget.notifier.editar(
         id:         widget.edit!.id,
@@ -2927,9 +3330,11 @@ class _DeviceFormState extends State<_DeviceForm> {
         cat:        _cat,
         modo:       _modo,
         ip:         _cIp.text,
-        puerto:     int.tryParse(_cPuerto.text.trim()) ?? 8888,
+        puerto:     puerto,
         urlBase:    _cUrl.text,
         habitacion: _cHab.text,
+        usuario:    usuario,
+        clave:      clave,
       );
       if (mounted) {
         Navigator.pop(context);
@@ -2942,9 +3347,11 @@ class _DeviceFormState extends State<_DeviceForm> {
         cat:        _cat,
         modo:       _modo,
         ip:         _cIp.text,
-        puerto:     int.tryParse(_cPuerto.text.trim()) ?? 8888,
+        puerto:     puerto,
         urlBase:    _cUrl.text,
         habitacion: _cHab.text,
+        usuario:    usuario,
+        clave:      clave,
         skipPing:   true,
       );
       if (mounted) {
@@ -3115,6 +3522,33 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
     _run();
   }
 
+  // Comprueba un endpoint sin descargar el stream completo
+  Future<void> _probarEndpoint(Dispositivo d, String url, String etiqueta) async {
+    _log('  GET $url', null);
+    final client = http.Client();
+    try {
+      final req = http.Request('GET', Uri.parse(url))
+        ..headers.addAll(d.authHeaders);
+      final resp = await client.send(req).timeout(AppConfig.pingTimeout);
+      final ok = resp.statusCode >= 200 && resp.statusCode < 300;
+      _log(
+        '  → HTTP ${resp.statusCode} ${ok ? "✓ $etiqueta disponible" : "— no disponible"}',
+        ok,
+      );
+      if (ok) {
+        _log('  Content-Type: ${resp.headers["content-type"] ?? "desconocido"}', null);
+      } else if (resp.statusCode == 401 || resp.statusCode == 403) {
+        _log('  → Usuario o contraseña incorrectos', false);
+      }
+    } on TimeoutException {
+      _log('  → TIMEOUT', false);
+    } catch (e) {
+      _log('  → ERROR: $e', false);
+    } finally {
+      client.close();
+    }
+  }
+
   Future<void> _run() async {
     setState(() {
       _logs.clear();
@@ -3128,11 +3562,17 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
     _log('Firmware:    ${d.tipo.label}', null);
     _log('Modo:        ${d.modo.label}', null);
     _log('Conexión:    ${d.conexionDisplay}', null);
+    _log('Autenticación: ${d.usuario.isEmpty ? "no" : "usuario ${d.usuario}"}', null);
     if (demo) {
       _log('⚠ Modo DEMO activo — simulando respuestas', null);
     }
     _log('─────────────────────────────', null);
-    if (d.tipo.esCamara) {
+    if (d.tipo.usaStream) {
+      for (final u in d.urlsStream) {
+        _log('URL video: $u', null);
+      }
+      _log('URL audio: ${d.urlAudio}', null);
+    } else if (d.tipo.esCamara) {
       _log('URL foto: ${d.urlSnapshot}', null);
     } else {
       _log('URL ON:  ${d.urlOn}', null);
@@ -3151,11 +3591,13 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
             ? d.urlBase.trim()
             : 'http://${d.ip.trim()}:${d.puerto}';
         final resp = await http
-            .get(Uri.parse(baseUrl))
+            .get(Uri.parse(baseUrl), headers: d.authHeaders)
             .timeout(AppConfig.pingTimeout);
         _log('  GET $baseUrl → HTTP ${resp.statusCode}',
             resp.statusCode < 400);
-        if (resp.statusCode >= 400) {
+        if (resp.statusCode == 401 || resp.statusCode == 403) {
+          _log('  → Requiere usuario y contraseña (o son incorrectos)', false);
+        } else if (resp.statusCode >= 400) {
           _log('  → Verifica IP/URL y conexión de red', false);
         } else {
           _log('  Host alcanzable ✓', true);
@@ -3165,19 +3607,34 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
           '  TIMEOUT — sin respuesta en ${AppConfig.pingTimeout.inSeconds}s',
           false,
         );
-        _log(
-            '  → Verifica IP/URL y que estés en la misma red',
-            false);
+        _log('  → Verifica IP/URL y que estés en la misma red', false);
       } catch (e) {
         _log('  ERROR: $e', false);
-        _log('  → Verifica IP/URL y conexión de red', false);
+        _log('  → Si la app de la cámara usa HTTPS, cámbiala a "solo HTTP"', false);
       }
     }
 
     _log('─────────────────────────────', null);
 
-    if (d.tipo.esCamara) {
-      // Cámara: verificar la foto
+    if (d.tipo.usaStream) {
+      _log('▶ Verificando video MJPEG...', null);
+      if (demo) {
+        await Future.delayed(const Duration(milliseconds: 300));
+        _log('  [DEMO] ${d.urlsStream.first} → OK ✓', true);
+      } else {
+        for (final u in d.urlsStream) {
+          await _probarEndpoint(d, u, 'Video');
+        }
+      }
+      _log('─────────────────────────────', null);
+      _log('▶ Verificando audio...', null);
+      if (demo) {
+        await Future.delayed(const Duration(milliseconds: 300));
+        _log('  [DEMO] ${d.urlAudio} → OK ✓', true);
+      } else {
+        await _probarEndpoint(d, d.urlAudio, 'Audio');
+      }
+    } else if (d.tipo.esCamara) {
       _log('▶ Verificando foto de la cámara...', null);
       if (demo) {
         await Future.delayed(const Duration(milliseconds: 300));
@@ -3185,17 +3642,15 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
       } else {
         try {
           final resp = await http
-              .get(Uri.parse(d.urlSnapshot))
+              .get(Uri.parse(d.urlSnapshot), headers: d.authHeaders)
               .timeout(AppConfig.pingTimeout);
           final ok = resp.statusCode >= 200 && resp.statusCode < 300;
           _log(
             '  GET ${d.urlSnapshot} → HTTP ${resp.statusCode} ${ok ? "✓ Foto disponible (${resp.bodyBytes.length} bytes)" : "— no disponible"}',
             ok,
           );
-          if (ok) {
-            _log('  Content-Type: ${resp.headers["content-type"] ?? "desconocido"}', null);
-          } else {
-            _log('  → Revisa el permiso de cámara en Web Remote Droid', false);
+          if (!ok) {
+            _log('  → Revisa el permiso de cámara en la app del otro celular', false);
           }
         } on TimeoutException {
           _log('  → TIMEOUT al pedir la foto', false);
@@ -3204,7 +3659,6 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
         }
       }
     } else {
-      // Otros: probar paths ON
       _log('▶ Buscando ruta ON válida (${d.urlsOnFallback.length} paths)...', null);
       if (demo) {
         await Future.delayed(const Duration(milliseconds: 300));
@@ -3215,7 +3669,7 @@ class _DiagnosticoPageState extends State<DiagnosticoPage> {
           _log('  GET $url', null);
           try {
             final resp = await http
-                .get(Uri.parse(url))
+                .get(Uri.parse(url), headers: d.authHeaders)
                 .timeout(AppConfig.pingTimeout);
             final ok =
                 resp.statusCode >= 200 && resp.statusCode < 300;
@@ -3335,6 +3789,7 @@ class _MicroBadge extends StatelessWidget {
           borderRadius: R.xl,
         ),
         child: Text(text,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
                 fontSize:   9,
                 fontWeight: FontWeight.w700,
