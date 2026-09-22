@@ -14,14 +14,25 @@
 //  TipoD.celular (flash /flash/on, /flash/off).
 //
 // Requisitos Android: permiso INTERNET y usesCleartextTraffic="true".
-// Requiere el paquete just_audio en pubspec.yaml.
+// Requiere just_audio, path_provider y share_plus en pubspec.yaml.
+//
+// NOVEDADES v5.6:
+//  [REC-1] Grabar video desde la app: guarda los cuadros JPEG del stream en
+//          un archivo .mjpeg dentro de la app (solo video, sin audio).
+//  [REC-2] Pantalla "Grabaciones": lista, compartir (VLC, Drive...) y borrar.
+//  [ROT-1] Botón "Girar" (0/90/180/270°) en la vista de la cámara.
+//  [IPC-4] Ruta de video por defecto: /video/mjpeg (confirmada), luego
+//          /video/m.jpeg.
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ════════════════════════════════════════════════════════════════
@@ -171,7 +182,7 @@ extension TipoDX on TipoD {
 
   // Video MJPEG (solo ipcam). Se prueban en orden.
   List<String> get pathsStream =>
-      this == TipoD.ipcam ? ['/video/m.jpeg', '/video/mjpeg'] : const [];
+      this == TipoD.ipcam ? ['/video/mjpeg', '/video/m.jpeg'] : const [];
 
   // Audio en vivo (solo ipcam)
   String get pathAudio => '/audio';
@@ -748,6 +759,84 @@ String _fmtTs(DateTime t) {
       '${t.hour}:${t.minute.toString().padLeft(2, '0')}';
 }
 
+String _fmtDur(Duration d) {
+  final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return d.inHours > 0 ? '${d.inHours}:$m:$s' : '$m:$s';
+}
+
+String _fmtBytes(int b) {
+  if (b < 1024) return '$b B';
+  if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+  return '${(b / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+// ════════════════════════════════════════════════════════════════
+// [REC-1] GRABADOR — guarda los cuadros JPEG en un archivo .mjpeg
+// ════════════════════════════════════════════════════════════════
+class Grabador {
+  IOSink?   _sink;
+  File?     _file;
+  DateTime? _inicio;
+  int       frames = 0;
+  int       bytes  = 0;
+
+  bool get activo => _sink != null;
+
+  Duration get duracion => _inicio == null
+      ? Duration.zero
+      : DateTime.now().difference(_inicio!);
+
+  /// Carpeta privada de la app donde se guardan las grabaciones.
+  static Future<Directory> carpeta() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir  = Directory('${base.path}/grabaciones');
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    return dir;
+  }
+
+  static String _limpio(String s) {
+    final t = s.trim().replaceAll(RegExp(r'[^A-Za-z0-9_-]+'), '_');
+    return t.isEmpty ? 'camara' : t;
+  }
+
+  Future<void> iniciar(String nombre) async {
+    if (activo) return;
+    final dir = await carpeta();
+    final n   = DateTime.now();
+    String dos(int v) => v.toString().padLeft(2, '0');
+    final ts = '${n.year}${dos(n.month)}${dos(n.day)}_'
+        '${dos(n.hour)}${dos(n.minute)}${dos(n.second)}';
+    _file   = File('${dir.path}/${_limpio(nombre)}_$ts.mjpeg');
+    _sink   = _file!.openWrite();
+    _inicio = DateTime.now();
+    frames  = 0;
+    bytes   = 0;
+  }
+
+  /// Escribe un cuadro JPEG (ignora si no se está grabando).
+  void agregar(Uint8List frame) {
+    final s = _sink;
+    if (s == null) return;
+    s.add(frame);
+    frames++;
+    bytes += frame.length;
+  }
+
+  /// Cierra el archivo y devuelve su ruta (o null si no había grabación).
+  Future<String?> detener() async {
+    final s = _sink;
+    final f = _file;
+    _sink   = null;
+    _file   = null;
+    _inicio = null;
+    if (s == null || f == null) return null;
+    await s.flush();
+    await s.close();
+    return f.path;
+  }
+}
+
 // ════════════════════════════════════════════════════════════════
 // APP ROOT
 // ════════════════════════════════════════════════════════════════
@@ -912,11 +1001,13 @@ class MjpegWidget extends StatefulWidget {
   final List<String>        urls;
   final Map<String, String> headers;
   final BoxFit              fit;
+  final void Function(Uint8List frame)? onFrame;
   const MjpegWidget({
     super.key,
     required this.urls,
     this.headers = const {},
     this.fit = BoxFit.contain,
+    this.onFrame,
   });
 
   @override
@@ -1031,6 +1122,7 @@ class _MjpegWidgetState extends State<MjpegWidget> {
       final frameEnd = end + 2;
       final frame    = Uint8List.fromList(buf.sublist(start, frameEnd));
       buf.removeRange(0, frameEnd);
+      widget.onFrame?.call(frame);
       if (mounted) {
         setState(() => _frame = frame);
       }
@@ -1139,12 +1231,14 @@ class SnapshotWidget extends StatefulWidget {
   final Map<String, String> headers;
   final Duration            interval;
   final BoxFit              fit;
+  final void Function(Uint8List frame)? onFrame;
   const SnapshotWidget({
     super.key,
     required this.url,
     this.headers = const {},
     this.interval = AppConfig.snapInterval,
     this.fit = BoxFit.contain,
+    this.onFrame,
   });
 
   @override
@@ -1191,6 +1285,7 @@ class _SnapshotWidgetState extends State<SnapshotWidget> {
         throw Exception('Respuesta vacía');
       }
       _fails = 0;
+      widget.onFrame?.call(r.bodyBytes);
       if (mounted) {
         setState(() {
           _frame = r.bodyBytes;
@@ -1315,6 +1410,14 @@ class _CamaraPageState extends State<CamaraPage> {
   // Linterna
   bool _torchOn = false;
 
+  // Grabación
+  final Grabador _rec = Grabador();
+  bool   _grabando = false;
+  Timer? _recTimer;
+
+  // Giro de la imagen (cuartos de vuelta: 0, 1, 2, 3)
+  int _giro = 0;
+
   @override
   void initState() {
     super.initState();
@@ -1328,8 +1431,37 @@ class _CamaraPageState extends State<CamaraPage> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _recTimer?.cancel();
+    unawaited(_rec.detener());
     _player.dispose();
     super.dispose();
+  }
+
+  Future<void> _toggleRec(Dispositivo d) async {
+    if (_grabando) {
+      await _detenerRec();
+      return;
+    }
+    try {
+      await _rec.iniciar(d.nombre);
+      _recTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+      if (mounted) setState(() => _grabando = true);
+    } catch (e) {
+      if (mounted) snack(context, 'No se pudo iniciar la grabación: $e', error: true);
+    }
+  }
+
+  Future<void> _detenerRec({bool aviso = true}) async {
+    _recTimer?.cancel();
+    _recTimer = null;
+    final ruta = await _rec.detener();
+    if (!mounted) return;
+    setState(() => _grabando = false);
+    if (aviso && ruta != null) {
+      snack(context, 'Grabación guardada ✓ (ver en Grabaciones)');
+    }
   }
 
   void _scheduleHide() {
@@ -1354,6 +1486,9 @@ class _CamaraPageState extends State<CamaraPage> {
     if (!encender && _audioOn) {
       await _player.stop();
       _audioOn = false;
+    }
+    if (!encender && _grabando) {
+      await _detenerRec();
     }
     final updated = widget.notifier.items
         .firstWhere((x) => x.id == _d.id, orElse: () => _d);
@@ -1417,12 +1552,14 @@ class _CamaraPageState extends State<CamaraPage> {
         key:     ValueKey(dActual.urlsStream.join('|')),
         urls:    dActual.urlsStream,
         headers: dActual.authHeaders,
+        onFrame: _rec.agregar,
       );
     } else {
       vista = SnapshotWidget(
         key:     ValueKey(dActual.urlSnapshot),
         url:     dActual.urlSnapshot,
         headers: dActual.authHeaders,
+        onFrame: _rec.agregar,
       );
     }
 
@@ -1432,7 +1569,9 @@ class _CamaraPageState extends State<CamaraPage> {
         // ── 1. Vista de la cámara ──────────────────────────────
         GestureDetector(
           onTap: _showControls,
-          child: SizedBox.expand(child: vista),
+          child: SizedBox.expand(
+            child: RotatedBox(quarterTurns: _giro, child: vista),
+          ),
         ),
 
         // ── 2. Gradiente superior ──────────────────────────────
@@ -1492,14 +1631,21 @@ class _CamaraPageState extends State<CamaraPage> {
                           ),
                           const SizedBox(width: 5),
                           Text(
-                            dActual.encendido
-                                ? (_audioOn ? 'En vivo · con audio' : 'En vivo')
-                                : 'Cámara apagada',
+                            _grabando
+                                ? '● GRABANDO ${_fmtDur(_rec.duracion)} · ${_fmtBytes(_rec.bytes)}'
+                                : dActual.encendido
+                                    ? (_audioOn ? 'En vivo · con audio' : 'En vivo')
+                                    : 'Cámara apagada',
                             style: TextStyle(
-                                color: dActual.encendido
-                                    ? C.green
-                                    : C.t3,
-                                fontSize: 11),
+                                color: _grabando
+                                    ? C.red
+                                    : dActual.encendido
+                                        ? C.green
+                                        : C.t3,
+                                fontSize: 11,
+                                fontWeight: _grabando
+                                    ? FontWeight.w700
+                                    : FontWeight.w400),
                           ),
                         ]),
                       ],
@@ -1540,7 +1686,7 @@ class _CamaraPageState extends State<CamaraPage> {
             child: Align(
               alignment: Alignment.bottomCenter,
               child: Container(
-                height: 170,
+                height: 250,
                 decoration: const BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.bottomCenter,
@@ -1599,6 +1745,32 @@ class _CamaraPageState extends State<CamaraPage> {
                           color: C.yellow,
                           onTap: () => _toggleTorch(dActual),
                         ),
+                      if (dActual.encendido)
+                        _CamControlBtn(
+                          icon: _grabando
+                              ? Icons.stop_circle_rounded
+                              : Icons.fiber_manual_record_rounded,
+                          label: _grabando ? 'Detener' : 'Grabar',
+                          color: C.red,
+                          onTap: () => _toggleRec(dActual),
+                        ),
+                      if (dActual.encendido)
+                        _CamControlBtn(
+                          icon:  Icons.rotate_right_rounded,
+                          label: 'Girar ${_giro * 90}°',
+                          color: C.purple,
+                          onTap: () => setState(() => _giro = (_giro + 1) % 4),
+                        ),
+                      _CamControlBtn(
+                        icon:  Icons.video_library_rounded,
+                        label: 'Grabaciones',
+                        color: C.green,
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const GrabacionesPage()),
+                        ),
+                      ),
                       _CamControlBtn(
                         icon:  Icons.wifi_find_rounded,
                         label: 'Diagnóstico',
@@ -2429,6 +2601,18 @@ class _DispPageState extends State<DispositivosPage> {
               title: const Text('Dispositivos',
                   style: TextStyle(
                       fontWeight: FontWeight.w700, color: C.t1)),
+              actions: [
+                IconButton(
+                  tooltip: 'Grabaciones',
+                  icon: const Icon(Icons.video_library_rounded,
+                      color: C.green),
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const GrabacionesPage()),
+                  ),
+                ),
+              ],
               bottom: PreferredSize(
                 preferredSize: const Size.fromHeight(56),
                 child: Padding(
@@ -3773,6 +3957,173 @@ class _DiagLog {
 }
 
 // ════════════════════════════════════════════════════════════════
+// [REC-2] PÁGINA: GRABACIONES
+// ════════════════════════════════════════════════════════════════
+class GrabacionesPage extends StatefulWidget {
+  const GrabacionesPage({super.key});
+
+  @override
+  State<GrabacionesPage> createState() => _GrabacionesPageState();
+}
+
+class _GrabacionesPageState extends State<GrabacionesPage> {
+  List<File> _files = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _cargar();
+  }
+
+  Future<void> _cargar() async {
+    final dir = await Grabador.carpeta();
+    final lista = dir
+        .listSync()
+        .whereType<File>()
+        .where((f) => f.path.endsWith('.mjpeg'))
+        .toList()
+      ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
+    if (mounted) {
+      setState(() {
+        _files   = lista;
+        _loading = false;
+      });
+    }
+  }
+
+  String _nombre(File f) => f.path.split('/').last;
+
+  Future<void> _compartir(File f) async {
+    try {
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(f.path)], text: _nombre(f)),
+      );
+    } catch (e) {
+      if (mounted) snack(context, 'No se pudo compartir: $e', error: true);
+    }
+  }
+
+  void _borrar(File f) {
+    showDialog(
+      context: context,
+      builder: (_) => _DeleteDialog(
+        titulo:    'Eliminar grabación',
+        nombre:    _nombre(f),
+        onConfirm: () {
+          try {
+            f.deleteSync();
+          } catch (_) {}
+          Navigator.pop(context);
+          _cargar();
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: C.bg,
+        appBar: AppBar(
+          backgroundColor: C.surface,
+          title: const Text('Grabaciones',
+              style: TextStyle(
+                  fontWeight: FontWeight.w700, color: C.t1)),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh_rounded, color: C.blue),
+              onPressed: _cargar,
+              tooltip: 'Actualizar',
+            ),
+          ],
+        ),
+        body: _loading
+            ? const Center(
+                child: CircularProgressIndicator(color: C.cyan))
+            : ListView(
+                padding: const EdgeInsets.all(14),
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: C.blueGlow,
+                      borderRadius: R.xs,
+                      border: Border.all(
+                          color: C.blue.withValues(alpha: 0.3)),
+                    ),
+                    child: const Text(
+                      'Las grabaciones son archivos .mjpeg (solo video, sin audio). '
+                      'Toca compartir y ábrelas con VLC. La velocidad de reproducción '
+                      'puede no ser exacta.',
+                      style: TextStyle(fontSize: 11, color: C.t2),
+                    ),
+                  ),
+                  if (_files.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 60),
+                      child: Center(
+                        child: Text('Aún no hay grabaciones',
+                            style: TextStyle(color: C.t2)),
+                      ),
+                    ),
+                  ..._files.map((f) {
+                    final st = f.statSync();
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: C.card,
+                        borderRadius: R.sm,
+                        border: Border.all(color: C.border),
+                      ),
+                      child: Row(children: [
+                        const Icon(Icons.videocam_rounded,
+                            color: C.cyan, size: 22),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            children: [
+                              Text(_nombre(f),
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: C.t1)),
+                              const SizedBox(height: 2),
+                              Text(
+                                  '${_fmtBytes(st.size)} · ${_fmtTs(st.modified)}',
+                                  style: const TextStyle(
+                                      fontSize: 11, color: C.t3)),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.share_rounded,
+                              color: C.blue, size: 20),
+                          onPressed: () => _compartir(f),
+                          tooltip: 'Compartir',
+                        ),
+                        IconButton(
+                          icon: const Icon(
+                              Icons.delete_outline_rounded,
+                              color: C.red,
+                              size: 20),
+                          onPressed: () => _borrar(f),
+                          tooltip: 'Eliminar',
+                        ),
+                      ]),
+                    );
+                  }),
+                ],
+              ),
+      );
+}
+
+// ════════════════════════════════════════════════════════════════
 // WIDGETS REUTILIZABLES
 // ════════════════════════════════════════════════════════════════
 class _MicroBadge extends StatelessWidget {
@@ -3846,15 +4197,18 @@ class _IconBtn extends StatelessWidget {
 class _DeleteDialog extends StatelessWidget {
   final String       nombre;
   final VoidCallback onConfirm;
+  final String       titulo;
   const _DeleteDialog(
-      {required this.nombre, required this.onConfirm});
+      {required this.nombre,
+      required this.onConfirm,
+      this.titulo = 'Eliminar dispositivo'});
 
   @override
   Widget build(BuildContext context) => AlertDialog(
         backgroundColor: C.card,
         shape: const RoundedRectangleBorder(borderRadius: R.md),
-        title: const Text('Eliminar dispositivo',
-            style: TextStyle(color: C.t1, fontSize: 16)),
+        title: Text(titulo,
+            style: const TextStyle(color: C.t1, fontSize: 16)),
         content: Text(
           '¿Eliminar "$nombre"?\nNo se puede deshacer.',
           style: const TextStyle(color: C.t2),
