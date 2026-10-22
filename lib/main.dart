@@ -1,4 +1,3 @@
-
 // ╔══════════════════════════════════════════════════════════════════╗
 // ║  DOMÓTICA PRO  v5.7  —  Producción                              ║
 // ╚══════════════════════════════════════════════════════════════════╝
@@ -639,6 +638,7 @@ class DispositivosNotifier extends ChangeNotifier {
   // [BAT-1] Sondeo periódico de batería
   static const _bateriaCada = Duration(seconds: 15);
   Timer? _bateriaTimer;
+  Timer? _bateriaInicial;
   bool   _bateriaBusy = false;
 
   DispositivosNotifier(List<Dispositivo> items, this._prefs)
@@ -647,15 +647,28 @@ class DispositivosNotifier extends ChangeNotifier {
       _nextId =
           _items.map((d) => d.id).reduce((a, b) => a > b ? a : b) + 1;
     }
+  }
+
+  // Los timers los inicia/detiene la UI (Shell) para que no queden
+  // pendientes al cerrarse la app ni en los tests.
+  void iniciarBaterias() {
+    if (_bateriaTimer != null) return;
     _bateriaTimer =
         Timer.periodic(_bateriaCada, (_) => refrescarBaterias());
-    // Primera lectura con un pequeño retraso para que la UI ya escuche.
-    Future.delayed(const Duration(seconds: 1), refrescarBaterias);
+    _bateriaInicial =
+        Timer(const Duration(seconds: 1), refrescarBaterias);
+  }
+
+  void detenerBaterias() {
+    _bateriaTimer?.cancel();
+    _bateriaInicial?.cancel();
+    _bateriaTimer   = null;
+    _bateriaInicial = null;
   }
 
   @override
   void dispose() {
-    _bateriaTimer?.cancel();
+    detenerBaterias();
     super.dispose();
   }
 
@@ -1076,6 +1089,18 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int _tab = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.notifier.iniciarBaterias();
+  }
+
+  @override
+  void dispose() {
+    widget.notifier.detenerBaterias();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
