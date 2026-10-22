@@ -23,3 +23,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  dependency_overrides:
+  shared_preferences_android: '>=2.4.0 <2.5.0'
