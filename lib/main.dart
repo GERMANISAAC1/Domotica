@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  DOMÓTICA PRO  v5.7  —  Producción                              ║
+// ║  DOMÓTICA PRO  v5.8  —  Producción                              ║
 // ╚══════════════════════════════════════════════════════════════════╝
 //
 // NOVEDADES v5.5:
@@ -31,6 +31,13 @@
 //  [BAT-2] Indicador visual (icono de batería + %, rayo al cargar, rojo
 //          <=15 %, naranja <=40 %, verde) en Control, Habitaciones,
 //          Dispositivos y en la barra superior de la cámara.
+//
+// NOVEDADES v5.8:
+//  [NV-1]  Visión nocturna en la vista de cámara: botón que alterna
+//          Normal → Verde (estilo intensificador de imagen) → B/N de alto
+//          contraste, con control de ganancia. Es un filtro de la vista
+//          (no modifica la cámara); la grabación guarda los cuadros
+//          originales sin filtro.
 
 import 'dart:async';
 import 'dart:convert';
@@ -884,23 +891,80 @@ class DispositivosNotifier extends ChangeNotifier {
 // ════════════════════════════════════════════════════════════════
 // MAIN
 // ════════════════════════════════════════════════════════════════
-void main() async {
+void main() {
+  // Cualquier error no controlado queda en el log en vez de congelar la app.
+  runZonedGuarded(_iniciar, (e, st) {
+    debugPrint('Error no controlado: $e\n$st');
+  });
+}
+
+Future<void> _iniciar() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ]);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor:                    Colors.transparent,
-    statusBarIconBrightness:           Brightness.light,
-    systemNavigationBarColor:          Color(0xFF070B14),
-    systemNavigationBarIconBrightness: Brightness.light,
-  ));
-  final prefs = await SharedPreferences.getInstance();
-  runApp(DomoticaApp(
-      notifier:
-          DispositivosNotifier(DispositivoRepo.cargar(prefs), prefs)));
+
+  // Si un widget falla al construirse, se muestra el error (no pantalla vacía).
+  ErrorWidget.builder = (d) => _PantallaError(d.exceptionAsString());
+  FlutterError.onError = (d) {
+    FlutterError.presentError(d);
+    debugPrint('FlutterError: ${d.exceptionAsString()}\n${d.stack}');
+  };
+
+  try {
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor:                    Colors.transparent,
+      statusBarIconBrightness:           Brightness.light,
+      systemNavigationBarColor:          Color(0xFF070B14),
+      systemNavigationBarIconBrightness: Brightness.light,
+    ));
+    final prefs = await SharedPreferences.getInstance();
+    runApp(DomoticaApp(
+        notifier:
+            DispositivosNotifier(DispositivoRepo.cargar(prefs), prefs)));
+  } catch (e, st) {
+    debugPrint('Error al iniciar: $e\n$st');
+    runApp(MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: _PantallaError('Error al iniciar la app:\n\n$e\n\n$st'),
+    ));
+  }
+}
+
+class _PantallaError extends StatelessWidget {
+  final String texto;
+  const _PantallaError(this.texto);
+
+  @override
+  Widget build(BuildContext context) => Directionality(
+        textDirection: TextDirection.ltr,
+        child: Material(
+          color: C.bg,
+          child: SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Error de la app',
+                      style: TextStyle(
+                          color:      C.red,
+                          fontSize:   18,
+                          fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 12),
+                  Text(texto,
+                      style: const TextStyle(
+                          color:      C.t2,
+                          fontSize:   12,
+                          fontFamily: 'monospace')),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -1606,6 +1670,10 @@ class _CamaraPageState extends State<CamaraPage> {
   // Giro de la imagen (cuartos de vuelta: 0, 1, 2, 3)
   int _giro = 0;
 
+  // [NV-1] Visión nocturna: 0 = off · 1 = verde · 2 = B/N
+  int    _nv     = 0;
+  double _nvGain = 2.5;
+
   @override
   void initState() {
     super.initState();
@@ -1764,7 +1832,13 @@ class _CamaraPageState extends State<CamaraPage> {
         GestureDetector(
           onTap: _showControls,
           child: SizedBox.expand(
-            child: RotatedBox(quarterTurns: _giro, child: vista),
+            child: RotatedBox(
+              quarterTurns: _giro,
+              child: ColorFiltered(
+                colorFilter: _filtroNocturno(_nv, _nvGain),
+                child: vista,
+              ),
+            ),
           ),
         ),
 
@@ -1908,7 +1982,34 @@ class _CamaraPageState extends State<CamaraPage> {
               child: SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-                  child: Wrap(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (dActual.encendido && _nv != 0)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 14),
+                          child: Row(children: [
+                            const Icon(Icons.brightness_low_rounded,
+                                size: 18, color: C.green),
+                            Expanded(
+                              child: Slider(
+                                value:  _nvGain,
+                                min:    1.0,
+                                max:    5.0,
+                                activeColor:   C.green,
+                                inactiveColor:
+                                    C.green.withValues(alpha: 0.25),
+                                onChanged: (v) {
+                                  setState(() => _nvGain = v);
+                                  _scheduleHide();
+                                },
+                              ),
+                            ),
+                            const Icon(Icons.brightness_high_rounded,
+                                size: 18, color: C.green),
+                          ]),
+                        ),
+                      Wrap(
                     alignment: WrapAlignment.center,
                     spacing: 20,
                     runSpacing: 14,
@@ -1959,6 +2060,20 @@ class _CamaraPageState extends State<CamaraPage> {
                           color: C.purple,
                           onTap: () => setState(() => _giro = (_giro + 1) % 4),
                         ),
+                      if (dActual.encendido)
+                        _CamControlBtn(
+                          icon: _nv == 0
+                              ? Icons.nightlight_outlined
+                              : Icons.nightlight_round,
+                          label: _nv == 0
+                              ? 'Visión noct.'
+                              : (_nv == 1 ? 'NV verde' : 'NV B/N'),
+                          color: C.green,
+                          onTap: () {
+                            setState(() => _nv = (_nv + 1) % 3);
+                            _scheduleHide();
+                          },
+                        ),
                       _CamControlBtn(
                         icon:  Icons.video_library_rounded,
                         label: 'Grabaciones',
@@ -1982,6 +2097,8 @@ class _CamaraPageState extends State<CamaraPage> {
                           ),
                         ),
                       ),
+                    ],
+                  ),
                     ],
                   ),
                 ),
@@ -4330,6 +4447,34 @@ class _GrabacionesPageState extends State<GrabacionesPage> {
 // ════════════════════════════════════════════════════════════════
 // WIDGETS REUTILIZABLES
 // ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// [NV-1] VISIÓN NOCTURNA (filtro de color)
+// ════════════════════════════════════════════════════════════════
+// modo 0 = normal (filtro identidad) · 1 = verde · 2 = blanco y negro.
+// Convierte a luminancia, multiplica por la ganancia y suma un pequeño
+// desplazamiento para levantar las sombras.
+ColorFilter _filtroNocturno(int modo, double ganancia) {
+  if (modo == 0) {
+    return const ColorFilter.mode(Colors.transparent, BlendMode.dst);
+  }
+  List<double> fila(double k) => [
+        0.299 * ganancia * k,
+        0.587 * ganancia * k,
+        0.114 * ganancia * k,
+        0,
+        12 * k,
+      ];
+  final rojo  = fila(modo == 1 ? 0.10 : 1);
+  final verde = fila(1);
+  final azul  = fila(modo == 1 ? 0.16 : 1);
+  return ColorFilter.matrix([
+    ...rojo,
+    ...verde,
+    ...azul,
+    0, 0, 0, 1, 0,
+  ]);
+}
+
 // ════════════════════════════════════════════════════════════════
 // [BAT-2] INDICADOR DE BATERÍA
 // ════════════════════════════════════════════════════════════════
