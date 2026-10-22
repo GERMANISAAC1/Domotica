@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  DOMÓTICA PRO  v5.8  —  Producción                              ║
+// ║  DOMÓTICA PRO  v5.9  —  Producción                              ║
 // ╚══════════════════════════════════════════════════════════════════╝
 //
 // NOVEDADES v5.5:
@@ -38,6 +38,15 @@
 //          contraste, con control de ganancia. Es un filtro de la vista
 //          (no modifica la cámara); la grabación guarda los cuadros
 //          originales sin filtro.
+//
+// NOVEDADES v5.9:
+//  [BAT-3] La batería también se muestra en cámaras ipcam: el servidor de
+//          batería del celular está en otro puerto (AppConfig.puertoBateria,
+//          8888) que el del video (4444); se usa la misma IP/host.
+//  [REC-2] Las grabaciones ahora son video AVI real (códec MJPG) con la
+//          duración y velocidad correctas, en vez de un .mjpeg crudo.
+//          Se abren con VLC o MX Player. Las .mjpeg antiguas se siguen
+//          listando.
 
 import 'dart:async';
 import 'dart:convert';
@@ -97,6 +106,7 @@ class AppConfig {
   static const maxLogItems  = 300;
   static const storageKey   = 'domotica_v5';
   static const snapInterval = Duration(milliseconds: 700);
+  static const puertoBateria = 8888; // servidor de batería del celular
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -221,7 +231,8 @@ extension TipoDX on TipoD {
 
   // [BAT-1] El celular que corre el servidor (puerto 8888) expone el nivel
   // de batería en /battery/level. Se prueban las rutas en orden.
-  bool get soportaBateria => this == TipoD.celular || this == TipoD.camara;
+  bool get soportaBateria =>
+      this == TipoD.celular || this == TipoD.camara || this == TipoD.ipcam;
   List<String> get pathsBateria => const ['/battery/level', '/battery'];
 
   int get puertoDefault => switch (this) {
@@ -417,8 +428,19 @@ class Dispositivo {
       tipo.pathsStream.map((p) => '$_base$p').toList();
   String get urlAudio => '$_base${tipo.pathAudio}';
   String urlTorch(bool on) => '$_base/?torch=${on ? "on" : "off"}';
-  List<String> get urlsBateria =>
-      tipo.pathsBateria.map((p) => '$_base$p').toList();
+  List<String> get urlsBateria {
+    var base = _base;
+    if (tipo == TipoD.ipcam) {
+      // [BAT-3] El video (p. ej. 4444) y la batería (8888) son puertos
+      // distintos del mismo celular: se usa el mismo host.
+      final host = modo == ModoConexion.url
+          ? (Uri.tryParse(urlBase.trim())?.host ?? '')
+          : ip.trim();
+      if (host.isEmpty) return const [];
+      base = 'http://$host:${AppConfig.puertoBateria}';
+    }
+    return tipo.pathsBateria.map((p) => '$base$p').toList();
+  }
 
   List<String> get urlsOnFallback  =>
       tipo.pathsOnFallback.map((p) => '$_base$p').toList();
@@ -1012,16 +1034,26 @@ String _fmtBytes(int b) {
 }
 
 // ════════════════════════════════════════════════════════════════
-// [REC-1] GRABADOR — guarda los cuadros JPEG en un archivo .mjpeg
+// [REC-2] GRABADOR — escribe un video AVI (códec MJPG) con los cuadros
+// JPEG recibidos. La duración y los fps se calculan al detener, así el
+// video se reproduce a la velocidad real.
 // ════════════════════════════════════════════════════════════════
 class Grabador {
-  IOSink?   _sink;
+  static const int _cab = 224; // tamaño de la cabecera AVI fija
+
+  RandomAccessFile? _raf;
   File?     _file;
   DateTime? _inicio;
   int       frames = 0;
   int       bytes  = 0;
 
-  bool get activo => _sink != null;
+  int _w = 640, _h = 480;
+  int _movi = 0;      // bytes de chunks dentro de 'movi' (sin el fourcc)
+  int _maxFrame = 0;
+  final List<int> _offs  = [];
+  final List<int> _sizes = [];
+
+  bool get activo => _raf != null;
 
   Duration get duracion => _inicio == null
       ? Duration.zero
@@ -1047,33 +1079,183 @@ class Grabador {
     String dos(int v) => v.toString().padLeft(2, '0');
     final ts = '${n.year}${dos(n.month)}${dos(n.day)}_'
         '${dos(n.hour)}${dos(n.minute)}${dos(n.second)}';
-    _file   = File('${dir.path}/${_limpio(nombre)}_$ts.mjpeg');
-    _sink   = _file!.openWrite();
+    _file   = File('${dir.path}/${_limpio(nombre)}_$ts.avi');
+    _raf    = await _file!.open(mode: FileMode.write);
     _inicio = DateTime.now();
     frames  = 0;
     bytes   = 0;
+    _movi   = 0;
+    _maxFrame = 0;
+    _offs.clear();
+    _sizes.clear();
+  }
+
+  /// Ancho y alto leídos del marcador SOF del JPEG (null si no se halla).
+  static (int, int)? _dimJpeg(Uint8List b) {
+    var i = 2;
+    while (i + 9 < b.length) {
+      if (b[i] != 0xFF) {
+        i++;
+        continue;
+      }
+      final m = b[i + 1];
+      if (m == 0xFF) {
+        i++;
+        continue;
+      }
+      if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) {
+        i += 2;
+        continue;
+      }
+      if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+        final h = (b[i + 5] << 8) | b[i + 6];
+        final w = (b[i + 7] << 8) | b[i + 8];
+        if (w > 0 && h > 0) return (w, h);
+        return null;
+      }
+      i += 2 + ((b[i + 2] << 8) | b[i + 3]);
+    }
+    return null;
+  }
+
+  static Uint8List _cabecera({
+    required int w,
+    required int h,
+    required int frames,
+    required double fps,
+    required int moviBytes,
+    required int fileLen,
+    required int maxFrame,
+  }) {
+    final b = ByteData(_cab);
+    void fcc(int o, String s) {
+      for (var i = 0; i < 4; i++) {
+        b.setUint8(o + i, s.codeUnitAt(i));
+      }
+    }
+
+    void u32(int o, int v) => b.setUint32(o, v, Endian.little);
+    void u16(int o, int v) => b.setUint16(o, v, Endian.little);
+
+    fcc(0, 'RIFF'); u32(4, fileLen - 8); fcc(8, 'AVI ');
+    fcc(12, 'LIST'); u32(16, 192); fcc(20, 'hdrl');
+    // avih
+    fcc(24, 'avih'); u32(28, 56);
+    u32(32, (1000000 / fps).round());
+    u32(36, 0); u32(40, 0); u32(44, 0x10); // AVIF_HASINDEX
+    u32(48, frames); u32(52, 0); u32(56, 1);
+    u32(60, maxFrame); u32(64, w); u32(68, h);
+    // strl
+    fcc(88, 'LIST'); u32(92, 116); fcc(96, 'strl');
+    fcc(100, 'strh'); u32(104, 56);
+    fcc(108, 'vids'); fcc(112, 'MJPG');
+    u32(116, 0); u16(120, 0); u16(122, 0); u32(124, 0);
+    u32(128, 1000); u32(132, (fps * 1000).round());
+    u32(136, 0); u32(140, frames); u32(144, maxFrame);
+    u32(148, 10000); u32(152, 0);
+    u16(156, 0); u16(158, 0); u16(160, w); u16(162, h);
+    fcc(164, 'strf'); u32(168, 40);
+    u32(172, 40); u32(176, w); u32(180, h);
+    u16(184, 1); u16(186, 24); fcc(188, 'MJPG');
+    u32(192, w * h * 3); u32(196, 0); u32(200, 0); u32(204, 0); u32(208, 0);
+    // movi
+    fcc(212, 'LIST'); u32(216, moviBytes + 4); fcc(220, 'movi');
+    return b.buffer.asUint8List();
   }
 
   /// Escribe un cuadro JPEG (ignora si no se está grabando).
   void agregar(Uint8List frame) {
-    final s = _sink;
-    if (s == null) return;
-    s.add(frame);
-    frames++;
-    bytes += frame.length;
+    final r = _raf;
+    if (r == null || frame.isEmpty) return;
+    try {
+      if (frames == 0) {
+        final d = _dimJpeg(frame);
+        if (d != null) {
+          _w = d.$1;
+          _h = d.$2;
+        }
+        // Cabecera provisional; se reescribe completa al detener.
+        r.writeFromSync(_cabecera(
+            w: _w, h: _h, frames: 0, fps: 10, moviBytes: 0,
+            fileLen: _cab, maxFrame: 0));
+      }
+      final pad = frame.length.isOdd ? 1 : 0;
+      final ch  = ByteData(8);
+      ch.setUint8(0, 0x30); ch.setUint8(1, 0x30); // '00'
+      ch.setUint8(2, 0x64); ch.setUint8(3, 0x63); // 'dc'
+      ch.setUint32(4, frame.length, Endian.little);
+      r.writeFromSync(ch.buffer.asUint8List());
+      r.writeFromSync(frame);
+      if (pad == 1) r.writeFromSync(const [0]);
+      _offs.add(4 + _movi); // relativo al fourcc 'movi'
+      _sizes.add(frame.length);
+      _movi += 8 + frame.length + pad;
+      if (frame.length > _maxFrame) _maxFrame = frame.length;
+      frames++;
+      bytes += frame.length;
+    } catch (_) {
+      // Un fallo de disco no debe romper la vista de la cámara.
+    }
   }
 
-  /// Cierra el archivo y devuelve su ruta (o null si no había grabación).
+  /// Cierra el archivo y devuelve su ruta (o null si no hubo cuadros).
   Future<String?> detener() async {
-    final s = _sink;
-    final f = _file;
-    _sink   = null;
+    final r   = _raf;
+    final f   = _file;
+    final ini = _inicio;
+    _raf    = null;
     _file   = null;
     _inicio = null;
-    if (s == null || f == null) return null;
-    await s.flush();
-    await s.close();
-    return f.path;
+    if (r == null || f == null) return null;
+
+    try {
+      if (frames == 0) {
+        await r.close();
+        if (f.existsSync()) f.deleteSync();
+        return null;
+      }
+
+      // Índice idx1
+      final n   = _offs.length;
+      final idx = ByteData(8 + 16 * n);
+      void fcc(int o, String s) {
+        for (var i = 0; i < 4; i++) {
+          idx.setUint8(o + i, s.codeUnitAt(i));
+        }
+      }
+
+      fcc(0, 'idx1');
+      idx.setUint32(4, 16 * n, Endian.little);
+      for (var i = 0; i < n; i++) {
+        final o = 8 + 16 * i;
+        fcc(o, '00dc');
+        idx.setUint32(o + 4, 0x10, Endian.little); // keyframe
+        idx.setUint32(o + 8, _offs[i], Endian.little);
+        idx.setUint32(o + 12, _sizes[i], Endian.little);
+      }
+      await r.writeFrom(idx.buffer.asUint8List());
+
+      // Cabecera final con fps reales
+      final seg = ini == null
+          ? 1.0
+          : (DateTime.now().difference(ini).inMilliseconds / 1000.0)
+              .clamp(0.1, 1e9)
+              .toDouble();
+      final fps = (frames / seg).clamp(0.2, 60.0).toDouble();
+      final total = _cab + _movi + 8 + 16 * n;
+      await r.setPosition(0);
+      await r.writeFrom(_cabecera(
+          w: _w, h: _h, frames: frames, fps: fps,
+          moviBytes: _movi, fileLen: total, maxFrame: _maxFrame));
+      await r.flush();
+      await r.close();
+      return f.path;
+    } catch (_) {
+      try {
+        await r.close();
+      } catch (_) {}
+      return f.path;
+    }
   }
 }
 
@@ -4302,7 +4484,8 @@ class _GrabacionesPageState extends State<GrabacionesPage> {
     final lista = dir
         .listSync()
         .whereType<File>()
-        .where((f) => f.path.endsWith('.mjpeg'))
+        .where((f) =>
+            f.path.endsWith('.avi') || f.path.endsWith('.mjpeg'))
         .toList()
       ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
     if (mounted) {
@@ -4374,9 +4557,9 @@ class _GrabacionesPageState extends State<GrabacionesPage> {
                           color: C.blue.withValues(alpha: 0.3)),
                     ),
                     child: const Text(
-                      'Las grabaciones son archivos .mjpeg (solo video, sin audio). '
-                      'Toca compartir y ábrelas con VLC. La velocidad de reproducción '
-                      'puede no ser exacta.',
+                      'Las grabaciones son videos .avi (sin audio). Toca compartir y '
+                      'guárdalas en tu teléfono, o ábrelas con VLC o MX Player. '
+                      'Los .mjpeg antiguos también se abren con VLC.',
                       style: TextStyle(fontSize: 11, color: C.t2),
                     ),
                   ),
