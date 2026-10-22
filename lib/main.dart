@@ -1,5 +1,6 @@
+
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  DOMÓTICA PRO  v5.5  —  Producción                              ║
+// ║  DOMÓTICA PRO  v5.7  —  Producción                              ║
 // ╚══════════════════════════════════════════════════════════════════╝
 //
 // NOVEDADES v5.5:
@@ -23,6 +24,14 @@
 //  [ROT-1] Botón "Girar" (0/90/180/270°) en la vista de la cámara.
 //  [IPC-4] Ruta de video por defecto: /video/mjpeg (confirmada), luego
 //          /video/m.jpeg.
+//
+// NOVEDADES v5.7:
+//  [BAT-1] Nivel de batería de los celulares (Celular flash / Cámara Web
+//          Remote Droid): lee GET /battery/level (JSON o texto plano) cada
+//          15 s, con el mismo formato que usa el monitor bateria.py.
+//  [BAT-2] Indicador visual (icono de batería + %, rayo al cargar, rojo
+//          <=15 %, naranja <=40 %, verde) en Control, Habitaciones,
+//          Dispositivos y en la barra superior de la cámara.
 
 import 'dart:async';
 import 'dart:convert';
@@ -204,6 +213,11 @@ extension TipoDX on TipoD {
   bool get esCamara  => this == TipoD.camara || this == TipoD.ipcam;
   bool get usaStream => this == TipoD.ipcam;
 
+  // [BAT-1] El celular que corre el servidor (puerto 8888) expone el nivel
+  // de batería en /battery/level. Se prueban las rutas en orden.
+  bool get soportaBateria => this == TipoD.celular || this == TipoD.camara;
+  List<String> get pathsBateria => const ['/battery/level', '/battery'];
+
   int get puertoDefault => switch (this) {
         TipoD.camara  => 8888,
         TipoD.celular => 8888,
@@ -275,6 +289,61 @@ class LogEntry {
   LogEntry(this.ts, this.msg, this.ok);
 }
 
+// [BAT-1] Lectura de batería. Acepta un número suelto, texto plano
+// ("85%", "85 charging") o JSON ({"percentage":85,"status":"CHARGING"}).
+class BateriaInfo {
+  final int     nivel;
+  final bool    cargando;
+  final String? detalle; // estado · temperatura
+  const BateriaInfo(this.nivel, {this.cargando = false, this.detalle});
+
+  static BateriaInfo? parse(String texto) {
+    final t = texto.trim();
+    if (t.isEmpty) return null;
+
+    num? nivel;
+    var cargando = false;
+    final extra = <String>[];
+
+    Object? data;
+    var esJson = true;
+    try {
+      data = jsonDecode(t);
+    } catch (_) {
+      esJson = false;
+    }
+
+    if (esJson && data is num) {
+      nivel = data;
+    } else if (esJson && data is Map) {
+      for (final k in const [
+        'percentage', 'percent', 'level', 'battery', 'capacity', 'batteryLevel'
+      ]) {
+        if (data[k] != null) {
+          nivel = num.tryParse(data[k].toString());
+          break;
+        }
+      }
+      final st = (data['status'] ?? data['state'] ?? '').toString().toUpperCase();
+      cargando = st.contains('CHARGING') && !st.contains('DISCHARGING');
+      if (st.isNotEmpty) extra.add(st);
+      if (data['temperature'] != null) extra.add('${data['temperature']} °C');
+    } else {
+      final m = RegExp(r'(\d{1,3}(?:\.\d+)?)').firstMatch(t);
+      if (m != null) nivel = num.tryParse(m.group(1)!);
+      cargando = RegExp(r'charging|cargando', caseSensitive: false).hasMatch(t) &&
+          !RegExp(r'discharging', caseSensitive: false).hasMatch(t);
+    }
+
+    if (nivel == null || nivel.isNaN || nivel.isInfinite) return null;
+    return BateriaInfo(
+      nivel.round().clamp(0, 100).toInt(),
+      cargando: cargando,
+      detalle:  extra.isEmpty ? null : extra.join(' · '),
+    );
+  }
+}
+
 class Dispositivo {
   final int    id;
   String       nombre;
@@ -291,6 +360,13 @@ class Dispositivo {
   DateTime?    ultimaAccion;
   int          toggleCount;
   bool?        online;
+
+  // [BAT-1] Estado de batería (transitorio, no se guarda en disco)
+  int?         bateria;               // 0–100, null = aún sin lectura
+  bool         cargando     = false;
+  String?      bateriaInfo;           // p. ej. "DISCHARGING · 30.0 °C"
+  DateTime?    bateriaTs;             // última lectura correcta
+  bool         bateriaError = false;  // la última lectura falló
 
   Dispositivo({
     required this.id,
@@ -335,6 +411,8 @@ class Dispositivo {
       tipo.pathsStream.map((p) => '$_base$p').toList();
   String get urlAudio => '$_base${tipo.pathAudio}';
   String urlTorch(bool on) => '$_base/?torch=${on ? "on" : "off"}';
+  List<String> get urlsBateria =>
+      tipo.pathsBateria.map((p) => '$_base$p').toList();
 
   List<String> get urlsOnFallback  =>
       tipo.pathsOnFallback.map((p) => '$_base$p').toList();
@@ -416,7 +494,12 @@ class Dispositivo {
         ultimaAccion: ultimaAccion ?? this.ultimaAccion,
         toggleCount:  toggleCount ?? this.toggleCount,
         online:       online      ?? this.online,
-      );
+      )
+        ..bateria      = bateria
+        ..cargando     = cargando
+        ..bateriaInfo  = bateriaInfo
+        ..bateriaTs    = bateriaTs
+        ..bateriaError = bateriaError;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -501,6 +584,23 @@ class NetCtrl {
 
   static Future<bool> pingDispositivo(Dispositivo d) => ping(
         modo: d.modo, ip: d.ip, puerto: d.puerto, urlBase: d.urlBase);
+
+  // [BAT-1] Lee el nivel de batería. null = sin respuesta o formato inválido.
+  static Future<BateriaInfo?> leerBateria(Dispositivo d) async {
+    for (final url in d.urlsBateria) {
+      try {
+        final r = await http
+            .get(Uri.parse(url), headers: d.authHeaders)
+            .timeout(AppConfig.pingTimeout);
+        if (r.statusCode == 404) continue; // probar la siguiente ruta
+        if (r.statusCode < 200 || r.statusCode >= 300) return null;
+        return BateriaInfo.parse(utf8.decode(r.bodyBytes, allowMalformed: true));
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -536,12 +636,72 @@ class DispositivosNotifier extends ChangeNotifier {
   bool _demo   = false;
   final List<LogEntry> _log = [];
 
+  // [BAT-1] Sondeo periódico de batería
+  static const _bateriaCada = Duration(seconds: 15);
+  Timer? _bateriaTimer;
+  bool   _bateriaBusy = false;
+
   DispositivosNotifier(List<Dispositivo> items, this._prefs)
       : _items = List.of(items) {
     if (_items.isNotEmpty) {
       _nextId =
           _items.map((d) => d.id).reduce((a, b) => a > b ? a : b) + 1;
     }
+    _bateriaTimer =
+        Timer.periodic(_bateriaCada, (_) => refrescarBaterias());
+    // Primera lectura con un pequeño retraso para que la UI ya escuche.
+    Future.delayed(const Duration(seconds: 1), refrescarBaterias);
+  }
+
+  @override
+  void dispose() {
+    _bateriaTimer?.cancel();
+    super.dispose();
+  }
+
+  // [BAT-1] Lee la batería de todos los dispositivos compatibles en paralelo.
+  // Solo notifica a la UI si algo cambió (la app entera escucha al notifier).
+  Future<void> refrescarBaterias() async {
+    if (_demo || _bateriaBusy) return;
+    _bateriaBusy = true;
+    try {
+      final ids = _items
+          .where((d) => d.tipo.soportaBateria)
+          .map((d) => d.id)
+          .toList();
+      if (ids.isEmpty) return;
+      final cambios = await Future.wait(ids.map(_leerBateria));
+      if (cambios.any((c) => c) && hasListeners) notifyListeners();
+    } finally {
+      _bateriaBusy = false;
+    }
+  }
+
+  Future<bool> _leerBateria(int id) async {
+    final i0 = _items.indexWhere((d) => d.id == id);
+    if (i0 == -1) return false;
+    final info = await NetCtrl.leerBateria(_items[i0]);
+
+    // El dispositivo pudo editarse o eliminarse mientras se esperaba.
+    final i = _items.indexWhere((d) => d.id == id);
+    if (i == -1) return false;
+    final d = _items[i];
+
+    if (info == null) {
+      if (d.bateriaError) return false;
+      d.bateriaError = true;
+      return true;
+    }
+    final cambio = d.bateria != info.nivel ||
+        d.cargando != info.cargando ||
+        d.bateriaInfo != info.detalle ||
+        d.bateriaError;
+    d.bateria      = info.nivel;
+    d.cargando     = info.cargando;
+    d.bateriaInfo  = info.detalle;
+    d.bateriaTs    = DateTime.now();
+    d.bateriaError = false;
+    return cambio;
   }
 
   List<Dispositivo> get items      => List.unmodifiable(_items);
@@ -641,6 +801,7 @@ class DispositivosNotifier extends ChangeNotifier {
     _addLog('Dispositivo "${nombre.trim()}" agregado', ok: true);
     if (hasListeners) notifyListeners();
     _save();
+    unawaited(refrescarBaterias());
     return true;
   }
 
@@ -675,6 +836,7 @@ class DispositivosNotifier extends ChangeNotifier {
     _addLog('Dispositivo "${nombre.trim()}" actualizado', ok: true);
     if (hasListeners) notifyListeners();
     _save();
+    unawaited(refrescarBaterias());
   }
 
   void eliminar(int id) {
@@ -690,6 +852,7 @@ class DispositivosNotifier extends ChangeNotifier {
   void toggleDemo() {
     _demo = !_demo;
     if (hasListeners) notifyListeners();
+    if (!_demo) unawaited(refrescarBaterias());
   }
 
   void limpiarLog() {
@@ -1422,14 +1585,20 @@ class _CamaraPageState extends State<CamaraPage> {
   void initState() {
     super.initState();
     _d = widget.d;
+    widget.notifier.addListener(_onNotifier);
     _scheduleHide();
     if (!_d.encendido) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _setCamara(true));
     }
   }
 
+  void _onNotifier() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    widget.notifier.removeListener(_onNotifier);
     _hideTimer?.cancel();
     _recTimer?.cancel();
     unawaited(_rec.detener());
@@ -1651,6 +1820,10 @@ class _CamaraPageState extends State<CamaraPage> {
                       ],
                     ),
                   ),
+                  if (dActual.tipo.soportaBateria) ...[
+                    _BateriaPill(dActual, grande: true),
+                    const SizedBox(width: 8),
+                  ],
                   Flexible(
                     child: Container(
                       padding: const EdgeInsets.symmetric(
@@ -2166,6 +2339,7 @@ class _ControlCard extends StatelessWidget {
                   Wrap(spacing: 6, runSpacing: 4, children: [
                     _MicroBadge(d.tipo.label, col: d.tipo.color),
                     _MicroBadge(d.habitacion, col: C.t3),
+                    if (d.tipo.soportaBateria) _BateriaPill(d),
                   ]),
                   const SizedBox(height: 4),
                   Row(children: [
@@ -2538,6 +2712,10 @@ class _DevTile extends StatelessWidget {
                 ],
               ),
               const Spacer(),
+              if (d.tipo.soportaBateria) ...[
+                _BateriaPill(d),
+                const SizedBox(height: 6),
+              ],
               Text(d.nombre,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -2781,6 +2959,7 @@ class _DispCardState extends State<_DispCard> {
                     _MicroBadge(d.tipo.label, col: col),
                     _MicroBadge(d.habitacion,  col: C.t2),
                     _MicroBadge(d.modo.label,  col: d.modo.color),
+                    if (d.tipo.soportaBateria) _BateriaPill(d),
                   ]),
                 ],
               ),
@@ -4126,6 +4305,126 @@ class _GrabacionesPageState extends State<GrabacionesPage> {
 // ════════════════════════════════════════════════════════════════
 // WIDGETS REUTILIZABLES
 // ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// [BAT-2] INDICADOR DE BATERÍA
+// ════════════════════════════════════════════════════════════════
+Color _colorBateria(int? n) => n == null
+    ? C.t3
+    : n <= 15
+        ? C.red
+        : n <= 40
+            ? C.orange
+            : C.green;
+
+// Icono de batería con relleno animado.
+class _BateriaGlyph extends StatelessWidget {
+  final int?   nivel;
+  final Color  color;
+  final double w, h;
+  const _BateriaGlyph({
+    required this.nivel,
+    required this.color,
+    required this.w,
+    required this.h,
+  });
+
+  @override
+  Widget build(BuildContext context) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: w, height: h,
+            padding: const EdgeInsets.all(1.5),
+            decoration: BoxDecoration(
+              border: Border.all(color: color, width: 1.4),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: TweenAnimationBuilder<double>(
+                tween:    Tween(begin: 0, end: (nivel ?? 0) / 100),
+                duration: const Duration(milliseconds: 500),
+                builder: (_, v, _) => FractionallySizedBox(
+                  widthFactor:  v.clamp(0.0, 1.0).toDouble(),
+                  heightFactor: 1,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color:        color,
+                      borderRadius: BorderRadius.circular(1.5),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Container(
+            width: 2, height: h * 0.4,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius:
+                  const BorderRadius.horizontal(right: Radius.circular(1)),
+            ),
+          ),
+        ],
+      );
+}
+
+// Píldora: icono + porcentaje (+ rayo si carga, nube tachada si no responde).
+class _BateriaPill extends StatelessWidget {
+  final Dispositivo d;
+  final bool        grande;
+  const _BateriaPill(this.d, {this.grande = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final n   = d.bateria;
+    final col = _colorBateria(n);
+    final sc  = grande ? 1.2 : 1.0;
+
+    final tip = StringBuffer('Batería');
+    if (d.bateriaInfo != null) tip.write(' · ${d.bateriaInfo}');
+    if (d.bateriaError) {
+      tip.write(' · sin respuesta');
+    } else if (d.bateriaTs != null) {
+      tip.write(' · ${_fmtTs(d.bateriaTs!)}');
+    }
+
+    return Tooltip(
+      message: tip.toString(),
+      child: Opacity(
+        opacity: d.bateriaError ? 0.55 : 1,
+        child: Container(
+          padding: EdgeInsets.symmetric(
+              horizontal: 7 * sc, vertical: 3 * sc),
+          decoration: BoxDecoration(
+            color:        col.withValues(alpha: 0.14),
+            borderRadius: R.xl,
+            border: Border.all(
+                color: col.withValues(alpha: 0.35), width: 0.8),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            _BateriaGlyph(nivel: n, color: col, w: 18 * sc, h: 9 * sc),
+            SizedBox(width: 5 * sc),
+            Text(n == null ? '--%' : '$n%',
+                style: TextStyle(
+                    fontSize:   10 * sc,
+                    fontWeight: FontWeight.w800,
+                    color:      col)),
+            if (d.cargando && !d.bateriaError) ...[
+              const SizedBox(width: 2),
+              Icon(Icons.bolt_rounded, size: 12 * sc, color: C.yellow),
+            ],
+            if (d.bateriaError) ...[
+              const SizedBox(width: 4),
+              Icon(Icons.cloud_off_rounded, size: 11 * sc, color: C.t2),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
 class _MicroBadge extends StatelessWidget {
   final String text;
   final Color  col;
