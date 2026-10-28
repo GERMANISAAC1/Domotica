@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <meta name="description" content="Descarga Domotica para Android. Controla y explora tus soluciones domóticas desde tu teléfono.">
+  <title>Domotica | Descarga para Android</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --panel: rgba(15, 29, 49, .88);
+      --text: #f3f7ff;
+      --muted: #a8b7cc;
+      --cyan: #55e6ff;
+      --blue: #5c8dff;
+      --line: rgba(147, 184, 226, .18);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(ellipse at 15% 5%, rgba(36, 112, 194, .28), transparent 36rem),
+        radial-gradient(ellipse at 90% 30%, rgba(37, 221, 235, .12), transparent 30rem),
+        var(--bg);
+    }
+    a { color: inherit; }
+    .wrap { width: min(1080px, calc(100% - 32px)); margin: auto; }
+    header { display:flex; align-items:center; justify-content:space-between; padding:22px 0; }
+    .brand { display:flex; align-items:center; gap:11px; font-weight:800; letter-spacing:.08em; }
+    .brand-icon {
+      display:grid; place-items:center; width:42px; height:42px; border-radius:13px;
+      color:#04111d; background:linear-gradient(135deg,var(--cyan),var(--blue));
+      box-shadow:0 0 28px rgba(85,230,255,.22); font-size:22px;
+    }
+    .tag { color:var(--muted); font-size:.85rem; border:1px solid var(--line); padding:8px 12px; border-radius:999px; }
+    main { padding:38px 0 70px; }
+    .hero { display:grid; grid-template-columns:1.15fr .85fr; gap:44px; align-items:center; padding:38px 0 52px; }
+    .eyebrow { color:var(--cyan); text-transform:uppercase; letter-spacing:.16em; font-size:.78rem; font-weight:800; }
+    h1 { font-size:clamp(2.7rem, 7vw, 5.3rem); line-height:.98; letter-spacing:-.055em; margin:16px 0 22px; }
+    h1 span { color:var(--cyan); }
+    .lead { max-width:610px; color:var(--muted); font-size:1.08rem; line-height:1.75; }
+    .actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:28px; }
+    .btn {
+      display:inline-flex; align-items:center; justify-content:center; gap:10px; min-height:52px;
+      padding:14px 19px; border-radius:14px; text-decoration:none; font-weight:800; border:1px solid transparent;
+      transition:transform .18s ease, box-shadow .18s ease;
+    }
+    .btn:hover { transform:translateY(-2px); }
+    .primary { color:#03111d; background:linear-gradient(100deg,var(--cyan),#8cecff); box-shadow:0 10px 35px rgba(85,230,255,.18); }
+    .secondary { border-color:var(--line); background:rgba(255,255,255,.035); }
+    .small-note { font-size:.82rem; color:var(--muted); margin-top:13px; }
+    .device-stage { min-height:360px; display:grid; place-items:center; position:relative; }
+    .orb { position:absolute; width:270px; height:270px; border-radius:50%; background:rgba(55,177,255,.12); filter:blur(5px); }
+    .device {
+      position:relative; width:min(270px, 85%); padding:13px; border:1px solid rgba(158,213,255,.38);
+      border-radius:34px; background:linear-gradient(145deg,#192b44,#07101c); box-shadow:0 30px 80px rgba(0,0,0,.42), 0 0 45px rgba(85,230,255,.09);
+      transform:rotate(-4deg);
+    }
+    .screen { min-height:330px; border-radius:24px; padding:24px 16px; background:linear-gradient(160deg,#102b48,#091522 75%); }
+    .screen-top { display:flex; justify-content:space-between; color:#b4c8dd; font-size:.75rem; }
+    .screen h2 { font-size:1.3rem; margin:28px 0 8px; }
+    .screen p { color:#9eb5ce; font-size:.8rem; line-height:1.5; }
+    .control { margin-top:12px; border:1px solid rgba(126,196,255,.19); background:rgba(255,255,255,.04); padding:13px; border-radius:14px; display:flex; align-items:center; justify-content:space-between; font-size:.82rem; }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--cyan); box-shadow:0 0 12px var(--cyan); }
+    .switch { width:34px; height:19px; border-radius:99px; background:#2c82a8; padding:3px; }
+    .switch:after { content:""; display:block; height:13px; width:13px; border-radius:50%; background:#eaffff; margin-left:15px; }
+    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:15px; }
+    .card { padding:23px; border:1px solid var(--line); background:var(--panel); border-radius:20px; }
+    .card-icon { font-size:1.6rem; }
+    .card h3 { margin:12px 0 7px; font-size:1.03rem; }
+    .card p { color:var(--muted); margin:0; line-height:1.65; font-size:.92rem; }
+    .section-title { margin:0 0 19px; font-size:1.65rem; letter-spacing:-.03em; }
+    .download-panel { margin-top:44px; padding:clamp(24px,5vw,42px); border:1px solid rgba(85,230,255,.24); border-radius:25px; background:linear-gradient(120deg,rgba(32,103,151,.2),rgba(17,32,53,.8)); display:flex; align-items:center; justify-content:space-between; gap:24px; }
+    .download-panel p { color:var(--muted); line-height:1.6; margin-bottom:0; }
+    .version { display:inline-block; border:1px solid var(--line); color:var(--cyan); border-radius:999px; padding:6px 10px; font-size:.8rem; margin-top:10px; }
+    .steps { display:grid; grid-template-columns:repeat(3,1fr); gap:15px; margin-top:18px; }
+    .step-num { color:var(--cyan); font-weight:900; font-size:1.2rem; }
+    footer { border-top:1px solid var(--line); padding:24px 0 34px; color:var(--muted); font-size:.84rem; }
+    footer .foot { display:flex; justify-content:space-between; gap:15px; flex-wrap:wrap; }
+    @media (max-width:760px) {
+      .hero { grid-template-columns:1fr; gap:15px; padding-top:22px; }
+      .device-stage { min-height:330px; }
+      .grid, .steps { grid-template-columns:1fr; }
+      .download-panel { align-items:flex-start; flex-direction:column; }
+      .tag { display:none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <div class="brand"><div class="brand-icon" aria-hidden="true">⌂</div><span>DOMOTICA</span></div>
+    <div class="tag">Aplicación para Android</div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">Tecnología para tu espacio</div>
+        <h1>Tu hogar,<br><span>más inteligente.</span></h1>
+        <p class="lead">Conoce Domotica, una aplicación Android para explorar y gestionar funciones de domótica desde tu teléfono. Descarga la versión disponible y descubre sus opciones.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/GERMANISAAC1/Domotica/releases/download/v1.0.20/app-release.apk" download>⬇ Descargar para Android</a>
+          <a class="btn secondary" href="https://github.com/GERMANISAAC1/Domotica/releases/latest" target="_blank" rel="noopener">Ver versiones ↗</a>
+        </div>
+        <div class="small-note">Archivo APK · Versión 1.0.20 · Descarga alojada en GitHub</div>
+      </div>
+      <div class="device-stage" aria-label="Ilustración decorativa de una aplicación domótica">
+        <div class="orb"></div>
+        <div class="device">
+          <div class="screen">
+            <div class="screen-top"><span>DOMOTICA</span><span>● Conectado</span></div>
+            <h2>Panel de control</h2>
+            <p>Una vista conceptual de una interfaz domótica. Las funciones reales dependen de la versión instalada y de tus dispositivos.</p>
+            <div class="control"><span>💡 Iluminación</span><span class="switch"></span></div>
+            <div class="control"><span>🌡 Ambiente</span><span>22°</span></div>
+            <div class="control"><span>🔌 Dispositivos</span><span class="dot"></span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="features">
+      <h2 class="section-title" id="features">Diseñada para llevar la tecnología contigo</h2>
+      <div class="grid">
+        <article class="card"><div class="card-icon">📲</div><h3>En tu Android</h3><p>Descarga el archivo APK desde el enlace oficial de este proyecto en GitHub.</p></article>
+        <article class="card"><div class="card-icon">🔗</div><h3>Fácil de compartir</h3><p>Envía esta página a tus contactos por WhatsApp, Facebook o cualquier aplicación de mensajería.</p></article>
+        <article class="card"><div class="card-icon">🛠️</div><h3>Proyecto en evolución</h3><p>Consulta las versiones publicadas para ver las actualizaciones disponibles.</p></article>
+      </div>
+    </section>
+
+    <section class="download-panel" aria-labelledby="download-title">
+      <div>
+        <div class="eyebrow">Empieza aquí</div>
+        <h2 id="download-title" class="section-title" style="margin-top:10px;margin-bottom:0">Descarga Domotica</h2>
+        <p>Pulsa el botón para descargar el instalador en tu dispositivo Android.</p>
+        <span class="version">Versión v1.0.20</span>
+      </div>
+      <div class="actions" style="margin-top:0">
+        <a class="btn primary" href="https://github.com/GERMANISAAC1/Domotica/releases/download/v1.0.20/app-release.apk" download>⬇ Descargar APK</a>
+        <button class="btn secondary" id="shareButton" type="button">Compartir página ↗</button>
+      </div>
+    </section>
+
+    <section style="margin-top:42px" aria-labelledby="install-title">
+      <h2 class="section-title" id="install-title">¿Cómo instalarla?</h2>
+      <div class="steps">
+        <article class="card"><div class="step-num">01</div><h3>Descarga</h3><p>Pulsa uno de los botones de descarga y espera a que termine.</p></article>
+        <article class="card"><div class="step-num">02</div><h3>Abre el archivo</h3><p>Busca el APK en Descargas y tócalo para iniciar la instalación.</p></article>
+        <article class="card"><div class="step-num">03</div><h3>Autoriza si hace falta</h3><p>Android podría pedir permiso para instalar desde esa fuente. Actívalo solo si confías en el archivo y en su procedencia.</p></article>
+      </div>
+      <p class="small-note">Consejo de seguridad: instala APK únicamente si confías en su desarrollador. Google Play Protect puede mostrar advertencias para aplicaciones instaladas fuera de Play Store.</p>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap foot">
+      <span>© <span id="year"></span> Domotica · Proyecto independiente</span>
+      <a href="https://github.com/GERMANISAAC1/Domotica" target="_blank" rel="noopener">Código y novedades en GitHub ↗</a>
+    </div>
+  </footer>
+  <script>
+    document.getElementById('year').textContent = new Date().getFullYear();
+    document.getElementById('shareButton').addEventListener('click', async () => {
+      const data = { title: document.title, text: 'Descarga Domotica para Android', url: location.href };
+      try {
+        if (navigator.share) await navigator.share(data);
+        else if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(location.href);
+          alert('Enlace copiado. Ya puedes pegarlo en WhatsApp o donde quieras compartirlo.');
+        } else {
+          window.prompt('Copia este enlace para compartir la página:', location.href);
+        }
+      } catch (e) {
+        if (e.name !== 'AbortError') window.prompt('Copia este enlace para compartir la página:', location.href);
+      }
+    });
+  </script>
+</body>
+</html>
